@@ -263,8 +263,8 @@ static int fio_gas_getevents(struct thread_data *td, unsigned int min,
 
   pr("fio_gas_getevents: min=%d max=%d\n", min, max);
 
-	assert(0 < min);
-	assert(min <= max);
+	assert(0 <= min);
+	assert(min <= max && 0 < max);
 
 	do {
     int take;
