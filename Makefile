@@ -30,11 +30,17 @@ SCRIPTS = $(addprefix $(SRCDIR)/,tools/fio_generate_plots tools/plot/fio2gnuplot
 
 ifndef CONFIG_FIO_NO_OPT
   CFLAGS += -O3 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+else
+  CFLAGS += -O0 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 endif
 
 ifdef CONFIG_GFIO
   PROGS += gfio
 endif
+
+CXXFLAGS = -std=c++11 -fpermissive $(OPTFLAGS)  -I. -I$(SRCDIR)
+#-Wwrite-strings -Wall $(EXTFLAGS) $(BUILD_CFLAGS)
+LINK=$(CC)
 
 SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/lib/*.c)) \
@@ -47,6 +53,8 @@ SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
 		workqueue.c rate-submit.c optgroup.c helper_thread.c \
 		steadystate.c
+		
+CPP_SOURCE := 
 
 ifdef CONFIG_LIBHDFS
   HDFSFLAGS= -I $(JAVA_HOME)/include -I $(JAVA_HOME)/include/linux -I $(FIO_LIBHDFS_INCLUDE)
@@ -54,6 +62,17 @@ ifdef CONFIG_LIBHDFS
   CFLAGS += $(HDFSFLAGS)
   SOURCE += engines/libhdfs.c
 endif
+
+  SOURCE += engines/gas.c
+  SOURCE += engines/thpool.c
+
+  SOURCE += engines/s3.c
+  CPP_SOURCE += engines/s3_worker.cpp
+  LIBS += -L $(AWS_SDK)/lib/ -laws-cpp-sdk-s3 -laws-cpp-sdk-core
+
+  AWS_SDK = /home/mzukowski/src/asy/aws-install/
+  CXXFLAGS += -I $(AWS_SDK)/include/
+  LINK = $(CXX)
 
 ifdef CONFIG_64BIT_LLP64
   CFLAGS += -DBITS_PER_LONG=32
@@ -185,7 +204,7 @@ ifneq (,$(findstring CYGWIN,$(CONFIG_TARGET_OS)))
   CFLAGS += -DPSAPI_VERSION=1 -Ios/windows/posix/include -Wno-format -static
 endif
 
-OBJS := $(SOURCE:.c=.o)
+OBJS := $(SOURCE:.c=.o) $(CPP_SOURCE:.cpp=.o)
 
 FIO_OBJS = $(OBJS) fio.o
 
@@ -278,8 +297,8 @@ PROGS += $(T_PROGS)
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
-	QUIET_CC	= @echo '   ' CC $@;
-	QUIET_LINK	= @echo ' ' LINK $@;
+#	QUIET_CC	= @echo '   ' CC $@;
+#	QUIET_LINK	= @echo ' ' LINK $@;
 	QUIET_DEP	= @echo '  ' DEP $@;
 	QUIET_YACC	= @echo ' ' YACC $@;
 	QUIET_LEX	= @echo '  ' LEX $@;
@@ -314,14 +333,25 @@ FIO-VERSION-FILE: FORCE
 override CFLAGS += -DFIO_VERSION='"$(FIO_VERSION)"'
 
 %.o : %.c
-	@mkdir -p $(dir $@)
+	mkdir -p $(dir $@)
 	$(QUIET_CC)$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -c $<
-	@$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
+	$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
 	@mv -f $*.d $*.d.tmp
 	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
 	@sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 | \
 		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d
 	@rm -f $*.d.tmp
+
+%.o : %.cpp
+	mkdir -p $(dir $@)
+	$(QUIET_CC)$(CXX) -o $@ $(CXXFLAGS) $(CPPFLAGS) -c $<
+	$(CXX) -MM $(CXXFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.cpp > $*.d
+	@mv -f $*.d $*.d.tmp
+	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
+	@sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 | \
+		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d
+	@rm -f $*.d.tmp
+
 
 ifdef CONFIG_ARITHMETIC
 lex.yy.c: exp/expression-parser.l
@@ -402,7 +432,7 @@ t/ieee754: $(T_IEEE_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_IEEE_OBJS) $(LIBS)
 
 fio: $(FIO_OBJS)
-	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(FIO_OBJS) $(LIBS) $(HDFSLIB)
+	$(QUIET_LINK)$(LINK) $(LDFLAGS) $(CFLAGS) -o $@ $(FIO_OBJS) $(LIBS) $(HDFSLIB)
 
 gfio: $(GFIO_OBJS)
 	$(QUIET_LINK)$(CC) $(filter-out -static, $(LDFLAGS)) -o gfio $(GFIO_OBJS) $(LIBS) $(GFIO_LIBS) $(GTK_LDFLAGS) $(HDFSLIB)

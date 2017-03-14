@@ -123,6 +123,8 @@ struct io_u {
 		struct ibv_mr *mr;
 #endif
 		void *mmap_data;
+
+		struct gas_io *gas_io;
 	};
 };
 

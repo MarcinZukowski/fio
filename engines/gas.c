@@ -3,6 +3,7 @@
  * Can be used to add (async) testing to fio for any kind of request
  * (e.g. disk, network, web etc).
  */
+#include "gas.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,26 +12,10 @@
 #include <assert.h>
 #include <libaio.h>
 
-#include "../fio.h"
 #include "../lib/pow2.h"
 #include "../optgroup.h"
 #include "../io_ddir.h"
 
-// From https://github.com/Pithikos/C-Thread-Pool
-#include "thpool.h"
-
-// #define pr(x...) printf(x)
-#define pr(x...)
-
-/**
- * Queue of pointers
- */
-typedef struct {
-  int capacity;
-  void **pointers;
-  int used;
-  int head;
-} qop;
 
 /**
  * Allocate a new QOP
@@ -79,33 +64,6 @@ int qop_used(qop *q)
   return q->used;
 }
 
-
-/**
- * The global state of GAS
- */
-struct gas_data {
-	int depth;
-
-  /** io_us ready to be committed */
-  qop *queued_io_us;
-
-	/** Entries that are finished */
-  qop *done_gas_ios;
-
-  struct gas_io **last_done_gas_ios;
-  unsigned int last_done_used;
-
-	pthread_mutex_t done_mutex;
-
-	threadpool thpool;
-};
-
-/** A single in-flight GAS request */
-struct gas_io {
-	struct io_u* io_u;
-	struct gas_data *gas_data;
-};
-
 /**
  * Options state for GAS
  */
@@ -137,6 +95,7 @@ static struct fio_option options[] = {
  */
 static int fio_gas_init(struct thread_data *td)
 {
+
 	struct gas_options *o = td->eo;
 	struct gas_data *d = td->io_ops_data;
 	int res;
@@ -247,7 +206,7 @@ static void fio_gas_queued(struct thread_data *td, struct io_u **io_us,
 }
 
 
-static void perform_work(void *arg)
+static void worker_wrapper(void *arg)
 {
 	struct gas_io *gas_io = (struct gas_io *) arg;
 	struct gas_data *d = gas_io->gas_data;
@@ -256,8 +215,8 @@ static void perform_work(void *arg)
 
   pr("perform_work: started on  io_u = %p\n", gas_io->io_u);
 
-	// First, sleep a bit
-	usleep(123);
+  // Call the actual worker
+  d->worker(arg);
 
 	pthread_mutex_lock(&d->done_mutex);
   qop_push(d->done_gas_ios, gas_io);
@@ -265,7 +224,11 @@ static void perform_work(void *arg)
 	pthread_mutex_unlock(&d->done_mutex);
 
   pr("perform_work: finished on io_u = %p done_used=%d\n", gas_io->io_u, du);
+}
 
+static void sleepy_worker(void *arg)
+{
+  usleep(100);
 }
 
 /**
@@ -281,7 +244,7 @@ static int fio_gas_commit(struct thread_data *td)
   while (qop_used(d->queued_io_us)) {
 		struct io_u *io_u = qop_pop(d->queued_io_us);
 
-		thpool_add_work(d->thpool, perform_work, io_u->gas_io);
+		thpool_add_work(d->thpool, worker_wrapper, io_u->gas_io);
     // perform_work(io_u->gas_io);
 
 		fio_gas_queued(td, &io_u, 1);
@@ -335,42 +298,64 @@ static int fio_gas_getevents(struct thread_data *td, unsigned int min,
 static struct io_u *fio_gas_event(struct thread_data *td, int event)
 {
 	struct gas_data *d = td->io_ops_data;
+  struct io_u *io_u;
 
   assert (event < d->last_done_used);
 
-	struct io_u *io_u = d->last_done_gas_ios[event]->io_u;
+	io_u = d->last_done_gas_ios[event]->io_u;
 	io_u->error = 0;
   pr("fio_gas_getevent: event=%d last_done_used=%d returning %p\n", event, d->last_done_used, io_u);
 
 	return io_u;
 }
 
+void gas_init_async(struct thread_data *td, void (*worker)(void*))
+{
+  struct gas_data *d;
+
+  fio_gas_init(td);
+
+  d = td->io_ops_data;
+  d->worker= worker;
+}
+
+void gas_register_async(struct ioengine_ops *ops)
+{
+  assert(ops->init);
+
+  ops->prep = fio_gas_prep;
+  ops->queue = fio_gas_queue;
+  ops->commit = fio_gas_commit;
+  ops->getevents = fio_gas_getevents;
+  ops->event = fio_gas_event;
+
+  register_ioengine(ops);
+}
+
+
+static int gas_init(struct thread_data *td)
+{
+  gas_init_async(td, sleepy_worker);
+  return 0;
+}
+
+
 static struct ioengine_ops gas_ioengine = {
-	.name			= "gas",
-	.version		= FIO_IOOPS_VERSION,
- 	.init			= fio_gas_init,
-	.prep			= fio_gas_prep,
-	.queue			= fio_gas_queue,
-	.commit			= fio_gas_commit,
-	.getevents		= fio_gas_getevents,
-	.event			= fio_gas_event,
-/*
-	.cancel			= fio_libaio_cancel,
-	.cleanup		= fio_libaio_cleanup,
-*/
-	.open_file		= generic_open_file,
-	.close_file		= generic_close_file,
-	.get_file_size		= generic_get_file_size,
-  .option_struct_size	= sizeof(struct gas_options),
-/*
- */
-	.options		= options,
+    .name			= "gas",
+    .version		= FIO_IOOPS_VERSION,
+    .init			= gas_init,
+
+    .open_file		= generic_open_file,
+    .close_file		= generic_close_file,
+    .get_file_size		= generic_get_file_size,
+    .option_struct_size	= sizeof(struct gas_options),
+    .options		= options,
 //	.flags			= FIO_DISKLESSIO
 };
 
 static void fio_init fio_gas_register(void)
 {
-	register_ioengine(&gas_ioengine);
+  gas_register_async(&gas_ioengine);
 }
 
 static void fio_exit fio_gas_unregister(void)
