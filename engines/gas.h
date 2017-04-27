@@ -44,8 +44,8 @@ struct gas_data {
 struct gas_io {
   struct io_u* io_u;
   struct gas_data *gas_data;
+  void* backend_data;
 };
-
 
 void gas_init_async(struct thread_data *td, void (*perform_work)(void*));
 

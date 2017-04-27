@@ -38,7 +38,7 @@ ifdef CONFIG_GFIO
   PROGS += gfio
 endif
 
-CXXFLAGS = -std=c++11 -fpermissive $(OPTFLAGS)  -I. -I$(SRCDIR)
+CXXFLAGS = -std=c++11 -fpermissive $(OPTFLAGS)  -I. -I$(SRCDIR) $(CFLAGS)
 #-Wwrite-strings -Wall $(EXTFLAGS) $(BUILD_CFLAGS)
 LINK=$(CC)
 

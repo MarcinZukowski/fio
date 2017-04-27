@@ -43,7 +43,7 @@ static void perform_work(void *arg)
 
   struct io_u *io_u = gas_io->io_u;
 
-  s3_read(io_u->file->file_name, io_u->offset, io_u->xfer_buflen);
+  s3_read(&gas_io->backend_data, io_u->file->file_name, io_u->offset, io_u->xfer_buflen);
 }
 
 static int s3_open_file(struct thread_data *td, struct fio_file *f)

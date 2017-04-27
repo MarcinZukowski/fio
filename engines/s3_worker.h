@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 void s3_init();
-int s3_read(const char *fname, size_t offset, size_t size);
+int s3_read(void **backend_data, const char *fname, size_t offset, size_t size);
 
 
 #ifdef __cplusplus

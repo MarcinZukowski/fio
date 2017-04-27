@@ -9,6 +9,8 @@
 #include <aws/core/client/ClientConfiguration.h>
 #include <fstream>
 
+thread_local Aws::S3::S3Client *s3_client = nullptr;
+
 extern "C"
 {
 
@@ -18,7 +20,7 @@ void s3_init()
   Aws::InitAPI(options);
 }
 
-int s3_read(const char *fname, size_t offset, size_t size)
+int s3_read(void **backend_data, const char *fname, size_t offset, size_t size)
 {
   size_t len = strlen(fname) + 1;
   char *str = alloca(len);
@@ -31,13 +33,22 @@ int s3_read(const char *fname, size_t offset, size_t size)
   const Aws::String bucket_name = str ;
   const Aws::String key_name = slash + 1;
 
-  printf("Reading '%s'  /  '%s'   %lld:%lld\n", bucket_name.c_str(), key_name.c_str(), offset, size);
+//  printf("Reading '%s'  /  '%s'   %lld:%lld\n", bucket_name.c_str(), key_name.c_str(), offset, size);
 
 //  Aws::Client::ClientConfiguration config;
 //  config.region = "us-west-2";
 //  config.endpointOverride= "http://s3-us-west-2.amazonaws.com";
 
-  Aws::S3::S3Client s3_client;
+//  Aws::S3::S3Client *s3_client = *backend_data;
+
+  if (s3_client == nullptr)
+  {
+    printf("Creating new S3Client\n");
+    fflush(stdout);
+
+    s3_client = new Aws::S3::S3Client();
+//    *backend_data = s3_client;
+  }
 
   char *range = alloca(1000);
   sprintf(range, "bytes=%lld-%lld", offset, offset + size - 1);
@@ -46,13 +57,15 @@ int s3_read(const char *fname, size_t offset, size_t size)
   object_request.WithBucket(bucket_name).WithKey(key_name);
   object_request.SetRange(range);
 
-  auto get_object_outcome = s3_client.GetObject(object_request);
+  printf("[%p] Issuing request: %s / %s %zd %zd\n", s3_client, bucket_name.c_str(), key_name.c_str(), offset, size);
+  auto get_object_outcome = s3_client->GetObject(object_request);
+  printf("[%p] Done request\n", s3_client);
 
   if (get_object_outcome.IsSuccess()) {
 //    Aws::OFStream local_file;
 //    local_file.open(key_name.c_str(), std::ios::out | std::ios::binary);
 //    local_file << get_object_outcome.GetResult().GetBody().rdbuf();
-    std::cout << "Done!" << std::endl;
+//    std::cout << "Done!" << std::endl;
   } else {
     std::cout << "GetObject error: " <<
               get_object_outcome.GetError().GetExceptionName() << " " <<
