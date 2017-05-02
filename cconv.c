@@ -97,7 +97,7 @@ void convert_thread_options_to_cpu(struct thread_options *o,
 	o->iodepth_batch_complete_min = le32_to_cpu(top->iodepth_batch_complete_min);
 	o->iodepth_batch_complete_max = le32_to_cpu(top->iodepth_batch_complete_max);
 	o->size = le64_to_cpu(top->size);
-	o->io_limit = le64_to_cpu(top->io_limit);
+	o->io_size = le64_to_cpu(top->io_size);
 	o->size_percent = le32_to_cpu(top->size_percent);
 	o->fill_device = le32_to_cpu(top->fill_device);
 	o->file_append = le32_to_cpu(top->file_append);
@@ -235,6 +235,7 @@ void convert_thread_options_to_cpu(struct thread_options *o,
 	o->new_group = le32_to_cpu(top->new_group);
 	o->numjobs = le32_to_cpu(top->numjobs);
 	o->cpus_allowed_policy = le32_to_cpu(top->cpus_allowed_policy);
+	o->gpu_dev_id = le32_to_cpu(top->gpu_dev_id);
 	o->iolog = le32_to_cpu(top->iolog);
 	o->rwmixcycle = le32_to_cpu(top->rwmixcycle);
 	o->nice = le32_to_cpu(top->nice);
@@ -242,6 +243,7 @@ void convert_thread_options_to_cpu(struct thread_options *o,
 	o->ioprio_class = le32_to_cpu(top->ioprio_class);
 	o->file_service_type = le32_to_cpu(top->file_service_type);
 	o->group_reporting = le32_to_cpu(top->group_reporting);
+	o->stats = le32_to_cpu(top->stats);
 	o->fadvise_hint = le32_to_cpu(top->fadvise_hint);
 	o->fallocate_mode = le32_to_cpu(top->fallocate_mode);
 	o->zero_buffers = le32_to_cpu(top->zero_buffers);
@@ -419,6 +421,7 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	top->new_group = cpu_to_le32(o->new_group);
 	top->numjobs = cpu_to_le32(o->numjobs);
 	top->cpus_allowed_policy = cpu_to_le32(o->cpus_allowed_policy);
+	top->gpu_dev_id = cpu_to_le32(o->gpu_dev_id);
 	top->iolog = cpu_to_le32(o->iolog);
 	top->rwmixcycle = cpu_to_le32(o->rwmixcycle);
 	top->nice = cpu_to_le32(o->nice);
@@ -426,6 +429,7 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	top->ioprio_class = cpu_to_le32(o->ioprio_class);
 	top->file_service_type = cpu_to_le32(o->file_service_type);
 	top->group_reporting = cpu_to_le32(o->group_reporting);
+	top->stats = cpu_to_le32(o->stats);
 	top->fadvise_hint = cpu_to_le32(o->fadvise_hint);
 	top->fallocate_mode = cpu_to_le32(o->fallocate_mode);
 	top->zero_buffers = cpu_to_le32(o->zero_buffers);
@@ -521,7 +525,7 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	memcpy(top->buffer_pattern, o->buffer_pattern, MAX_PATTERN_SIZE);
 
 	top->size = __cpu_to_le64(o->size);
-	top->io_limit = __cpu_to_le64(o->io_limit);
+	top->io_size = __cpu_to_le64(o->io_size);
 	top->verify_backlog = __cpu_to_le64(o->verify_backlog);
 	top->start_delay = __cpu_to_le64(o->start_delay);
 	top->start_delay_high = __cpu_to_le64(o->start_delay_high);

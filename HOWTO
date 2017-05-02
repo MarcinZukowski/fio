@@ -543,6 +543,8 @@ Parameter types
 
 	If the option accepts an upper and lower range, use a colon ':' or
 	minus '-' to separate such values. See :ref:`irange <irange>`.
+	If the lower value specified happens to be larger than the upper value,
+	two values are swapped.
 
 .. _bool:
 
@@ -631,7 +633,8 @@ Job description
 
 .. option:: numjobs=int
 
-	Create the specified number of clones of this job. May be used to setup a
+	Create the specified number of clones of this job. Each clone of job
+	is spawned as an independent thread or process. May be used to setup a
 	larger number of threads/processes doing the same thing. Each thread is
 	reported separately; to see statistics for all clones as a whole, use
 	:option:`group_reporting` in conjunction with :option:`new_group`.
@@ -643,9 +646,10 @@ Time related parameters
 
 .. option:: runtime=time
 
-	Tell fio to terminate processing after the specified number of seconds. It
+	Tell fio to terminate processing after the specified period of time.  It
 	can be quite hard to determine for how long a specified job will run, so
-	this parameter is handy to cap the total runtime to a given time.
+	this parameter is handy to cap the total runtime to a given time.  When
+	the unit is omitted, the value is given in seconds.
 
 .. option:: time_based
 
@@ -667,7 +671,8 @@ Time related parameters
 	before logging results, thus minimizing the runtime required for stable
 	results. Note that the ``ramp_time`` is considered lead in time for a job,
 	thus it will increase the total runtime if a special timeout or
-	:option:`runtime` is specified.
+	:option:`runtime` is specified.  When the unit is omitted, the value is
+	given in seconds.
 
 .. option:: clocksource=str
 
@@ -691,7 +696,7 @@ Time related parameters
 .. option:: gtod_reduce=bool
 
 	Enable all of the :manpage:`gettimeofday(2)` reducing options
-	(:option:`disable_clat`, :option:`disable_slat`, :option:`disable_bw`) plus
+	(:option:`disable_clat`, :option:`disable_slat`, :option:`disable_bw_measurement`) plus
 	reduce precision of the timeout somewhat to really shrink the
 	:manpage:`gettimeofday(2)` call count. With this option enabled, we only do
 	about 0.4% of the :manpage:`gettimeofday(2)` calls we would have done if all
@@ -730,11 +735,15 @@ Target file/device
 
 	Fio normally makes up a `filename` based on the job name, thread number, and
 	file number. If you want to share files between threads in a job or several
-	jobs, specify a `filename` for each of them to override the default.  If the
-	ioengine is file based, you can specify a number of files by separating the
-	names with a ':' colon. So if you wanted a job to open :file:`/dev/sda` and
-	:file:`/dev/sdb` as the two working files, you would use
-	``filename=/dev/sda:/dev/sdb``.
+	jobs with fixed file paths, specify a `filename` for each of them to override
+	the default. If the ioengine is file based, you can specify a number of files
+	by separating the names with a ':' colon. So if you wanted a job to open
+	:file:`/dev/sda` and :file:`/dev/sdb` as the two working files, you would use
+	``filename=/dev/sda:/dev/sdb``. This also means that whenever this option is
+	specified, :option:`nrfiles` is ignored. The size of regular files specified
+	by this option will be :option:`size` divided by number of files unless
+	explicit size is specified by :option:`filesize`.
+
 	On Windows, disk devices are accessed as :file:`\\\\.\\PhysicalDrive0` for
 	the first device, :file:`\\\\.\\PhysicalDrive1` for the second etc.
 	Note: Windows and FreeBSD prevent write access to areas
@@ -796,7 +805,12 @@ Target file/device
 
 .. option:: nrfiles=int
 
-	Number of files to use for this job. Defaults to 1.
+	Number of files to use for this job. Defaults to 1. The size of files
+	will be :option:`size` divided by this unless explicit size is specified by
+	:option:`filesize`. Files are created for each thread separately, and each
+	file will have a file number within its name by default, as explained in
+	:option:`filename` section.
+
 
 .. option:: openfiles=int
 
@@ -874,7 +888,8 @@ Target file/device
 	If this isn't set, fio will abort jobs that are destructive (e.g. that write)
 	to what appears to be a mounted device or partition. This should help catch
 	creating inadvertently destructive tests, not realizing that the test will
-	destroy data on the mounted file system. Default: false.
+	destroy data on the mounted file system. Note that some platforms don't allow
+	writing against a mounted device regardless of this option. Default: false.
 
 .. option:: pre_read=bool
 
@@ -1059,7 +1074,8 @@ I/O type
 
 	Start I/O at the given offset in the file. The data before the given offset
 	will not be touched. This effectively caps the file size at `real_size -
-	offset`.
+	offset`. Can be combined with :option:`size` to constrain the start and
+	end range that I/O will be done within.
 
 .. option:: offset_increment=int
 
@@ -1086,13 +1102,15 @@ I/O type
 	blocks given. For example, if you give 32 as a parameter, fio will sync the
 	file for every 32 writes issued. If fio is using non-buffered I/O, we may
 	not sync the file. The exception is the sg I/O engine, which synchronizes
-	the disk cache anyway.
+	the disk cache anyway. Defaults to 0, which means no sync every certain
+	number of writes.
 
 .. option:: fdatasync=int
 
 	Like :option:`fsync` but uses :manpage:`fdatasync(2)` to only sync data and
-	not metadata blocks.  In FreeBSD and Windows there is no
+	not metadata blocks.  In Windows, FreeBSD, and DragonFlyBSD there is no
 	:manpage:`fdatasync(2)`, this falls back to using :manpage:`fsync(2)`.
+	Defaults to 0, which means no sync data every certain number of writes.
 
 .. option:: write_barrier=int
 
@@ -1413,7 +1431,9 @@ Buffers and memory
 .. option:: invalidate=bool
 
 	Invalidate the buffer/page cache parts for this file prior to starting
-	I/O. Defaults to true.
+	I/O if the platform and file type support it. Defaults to true.
+	This will be ignored if :option:`pre_read` is also specified for the
+	same job.
 
 .. option:: sync=bool
 
@@ -1447,6 +1467,9 @@ Buffers and memory
 
 		**mmapshared**
 			Same as mmap, but use a MMAP_SHARED mapping.
+
+		**cudamalloc**
+			Use GPU memory as the buffers for GPUDirect RDMA benchmark.
 
 	The area allocated is a function of the maximum allowed bs size for the job,
 	multiplied by the I/O depth given. Note that for **shmhuge** and
@@ -1494,15 +1517,19 @@ I/O size
 
 .. option:: size=int
 
-	The total size of file I/O for this job. Fio will run until this many bytes
-	has been transferred, unless runtime is limited by other options (such as
-	:option:`runtime`, for instance, or increased/decreased by
-	:option:`io_size`). Unless specific :option:`nrfiles` and :option:`filesize`
-	options are given, fio will divide this size between the available files
-	specified by the job. If not set, fio will use the full size of the given
+	The total size of file I/O for each thread of this job. Fio will run until
+	this many bytes has been transferred, unless runtime is limited by other options
+	(such as :option:`runtime`, for instance, or increased/decreased by :option:`io_size`).
+	Fio will divide this size between the available files determined by options
+	such as :option:`nrfiles`, :option:`filename`, unless :option:`filesize` is
+	specified by the job. If the result of division happens to be 0, the size is
+	set to the physical size of the given files or devices if they exist.
+	If this option is not specified, fio will use the full size of the given
 	files or devices.  If the files do not exist, size must be given. It is also
 	possible to give size as a percentage between 1 and 100. If ``size=20%`` is
 	given, fio will use 20% of the full size of the given files or devices.
+	Can be combined with :option:`offset` to constrain the start and end range
+	that I/O will be done within.
 
 .. option:: io_size=int, io_limit=int
 
@@ -1521,6 +1548,8 @@ I/O size
 	Individual file sizes. May be a range, in which case fio will select sizes
 	for files at random within the given range and limited to :option:`size` in
 	total (if that is given). If not given, each created file is the same size.
+	This option overrides :option:`size` in terms of file size, which means
+	this value is used as a fixed size or possible range of each file.
 
 .. option:: file_append=bool
 
@@ -1549,6 +1578,7 @@ I/O engine
 		**sync**
 			Basic :manpage:`read(2)` or :manpage:`write(2)`
 			I/O. :manpage:`lseek(2)` is used to position the I/O location.
+			See :option:`fsync` and :option:`fdatasync` for syncing write I/Os.
 
 		**psync**
 			Basic :manpage:`pread(2)` or :manpage:`pwrite(2)` I/O.  Default on
@@ -1648,6 +1678,11 @@ I/O engine
 			DDIR_TRIM
 				does fallocate(,mode = FALLOC_FL_KEEP_SIZE|FALLOC_FL_PUNCH_HOLE).
 
+		**ftruncate**
+			I/O engine that sends :manpage:`ftruncate(2)` operations in response
+			to write (DDIR_WRITE) events. Each ftruncate issued sets the file's
+			size to the current block offset. Block size is ignored.
+
 		**e4defrag**
 			I/O engine that does regular EXT4_IOC_MOVE_EXT ioctls to simulate
 			defragment activity in request to DDIR_WRITE event.
@@ -1677,7 +1712,7 @@ I/O engine
 			files based on the offset generated by fio backend. (see the example
 			job file to create such files, use ``rw=write`` option). Please
 			note, you might want to set necessary environment variables to work
-			with hdfs/libhdfs properly. Each jobs uses it's own connection to
+			with hdfs/libhdfs properly.  Each job uses its own connection to
 			HDFS.
 
 		**mtd**
@@ -1719,14 +1754,15 @@ caveat that when used on the command line, they must come after the
 	reap events. The reaping mode is only enabled when polling for a minimum of
 	0 events (e.g. when :option:`iodepth_batch_complete` `=0`).
 
-.. option:: hipri : [psyncv2]
+.. option:: hipri : [pvsync2]
 
 	Set RWF_HIPRI on I/O, indicating to the kernel that it's of higher priority
 	than normal.
 
 .. option:: cpuload=int : [cpuio]
 
-	Attempt to use the specified percentage of CPU cycles.
+	Attempt to use the specified percentage of CPU cycles. This is a mandatory
+	option when using cpuio I/O engine.
 
 .. option:: cpuchunks=int : [cpuio]
 
@@ -1947,15 +1983,17 @@ I/O rate
 
 .. option:: thinktime=time
 
-	Stall the job x microseconds after an I/O has completed before issuing the
-	next. May be used to simulate processing being done by an application. See
+	Stall the job for the specified period of time after an I/O has completed before issuing the
+	next. May be used to simulate processing being done by an application.
+	When the unit is omitted, the value is given in microseconds.  See
 	:option:`thinktime_blocks` and :option:`thinktime_spin`.
 
 .. option:: thinktime_spin=time
 
 	Only valid if :option:`thinktime` is set - pretend to spend CPU time doing
 	something with the data received, before falling back to sleeping for the
-	rest of the period specified by :option:`thinktime`.
+	rest of the period specified by :option:`thinktime`.  When the unit is
+	omitted, the value is given in microseconds.
 
 .. option:: thinktime_blocks=int
 
@@ -2010,15 +2048,15 @@ I/O latency
 .. option:: latency_target=time
 
 	If set, fio will attempt to find the max performance point that the given
-	workload will run at while maintaining a latency below this target. The
-	values is given in microseconds.  See :option:`latency_window` and
-	:option:`latency_percentile`.
+	workload will run at while maintaining a latency below this target.  When
+	the unit is omitted, the value is given in microseconds.  See
+	:option:`latency_window` and :option:`latency_percentile`.
 
 .. option:: latency_window=time
 
 	Used with :option:`latency_target` to specify the sample window that the job
-	is run at varying queue depths to test the performance. The value is given
-	in microseconds.
+	is run at varying queue depths to test the performance.  When the unit is
+	omitted, the value is given in microseconds.
 
 .. option:: latency_percentile=float
 
@@ -2029,8 +2067,9 @@ I/O latency
 
 .. option:: max_latency=time
 
-	If set, fio will exit the job if it exceeds this maximum latency. It will
-	exit with an ETIME error.
+	If set, fio will exit the job with an ETIMEDOUT error if it exceeds this
+	maximum latency. When the unit is omitted, the value is given in
+	microseconds.
 
 .. option:: rate_cycle=int
 
@@ -2100,7 +2139,8 @@ Threads, processes and job synchronization
 .. option:: thread
 
 	Fio defaults to forking jobs, however if this option is given, fio will use
-	:manpage:`pthread_create(3)` to create threads instead.
+	POSIX Threads function :manpage:`pthread_create(3)` to create threads instead
+	of forking processes.
 
 .. option:: wait_for=str
 
@@ -2332,6 +2372,18 @@ Verification
 		**sha1**
 			Use optimized sha1 as the checksum function.
 
+		**sha3-224**
+			Use optimized sha3-224 as the checksum function.
+
+		**sha3-256**
+			Use optimized sha3-256 as the checksum function.
+
+		**sha3-384**
+			Use optimized sha3-384 as the checksum function.
+
+		**sha3-512**
+			Use optimized sha3-512 as the checksum function.
+
 		**meta**
 			This option is deprecated, since now meta information is included in
 			generic verification header and meta verification happens by
@@ -2520,13 +2572,14 @@ Steady state
 
 	A rolling window of this duration will be used to judge whether steady state
 	has been reached. Data will be collected once per second. The default is 0
-	which disables steady state detection.
+	which disables steady state detection.  When the unit is omitted, the
+	value is given in seconds.
 
 .. option:: steadystate_ramp_time=time, ss_ramp=time
 
 	Allow the job to run for the specified duration before beginning data
 	collection for checking the steady state job termination criterion. The
-	default is 0.
+	default is 0.  When the unit is omitted, the value is given in seconds.
 
 
 Measurements and reporting
@@ -2553,6 +2606,12 @@ Measurements and reporting
 	Start a new reporting group. See: :option:`group_reporting`.  If not given,
 	all jobs in a file will be part of the same reporting group, unless
 	separated by a :option:`stonewall`.
+
+.. option:: stats
+
+	By default, fio collects and shows final output results for all jobs
+	that run. If this option is set to 0, then fio will ignore it in
+	the final stat output.
 
 .. option:: write_bw_log=str
 
@@ -2697,7 +2756,7 @@ Measurements and reporting
 	the number of calls to :manpage:`gettimeofday(2)`, as that does impact
 	performance at really high IOPS rates.  Note that to really get rid of a
 	large amount of these calls, this option must be used with
-	:option:`disable_slat` and :option:`disable_bw` as well.
+	:option:`disable_slat` and :option:`disable_bw_measurement` as well.
 
 .. option:: disable_clat=bool
 
@@ -2709,7 +2768,7 @@ Measurements and reporting
 	Disable measurements of submission latency numbers. See
 	:option:`disable_slat`.
 
-.. option:: disable_bw=bool
+.. option:: disable_bw_measurement=bool, disable_bw=bool
 
 	Disable measurements of throughput/bandwidth numbers. See
 	:option:`disable_lat`.
@@ -2790,6 +2849,92 @@ Error handling
 	If set dump every error even if it is non fatal, true by default. If
 	disabled only fatal error will be dumped.
 
+Running predefined workloads
+----------------------------
+
+Fio includes predefined profiles that mimic the I/O workloads generated by
+other tools.
+
+.. option:: profile=str
+
+	The predefined workload to run.  Current profiles are:
+
+		**tiobench**
+			Threaded I/O bench (tiotest/tiobench) like workload.
+
+		**act**
+			Aerospike Certification Tool (ACT) like workload.
+
+To view a profile's additional options use :option:`--cmdhelp` after specifying
+the profile.  For example::
+
+$ fio --profile=act --cmdhelp
+
+Act profile options
+~~~~~~~~~~~~~~~~~~~
+
+.. option:: device-names=str
+	:noindex:
+
+	Devices to use.
+
+.. option:: load=int
+	:noindex:
+
+	ACT load multiplier.  Default: 1.
+
+.. option:: test-duration=time
+	:noindex:
+
+	How long the entire test takes to run.  Default: 24h.
+
+.. option:: threads-per-queue=int
+	:noindex:
+
+	Number of read IO threads per device.  Default: 8.
+
+.. option:: read-req-num-512-blocks=int
+	:noindex:
+
+	Number of 512B blocks to read at the time.  Default: 3.
+
+.. option:: large-block-op-kbytes=int
+	:noindex:
+
+	Size of large block ops in KiB (writes).  Default: 131072.
+
+.. option:: prep
+	:noindex:
+
+	Set to run ACT prep phase.
+
+Tiobench profile options
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. option:: size=str
+	:noindex:
+
+	Size in MiB
+
+.. option:: block=int
+	:noindex:
+
+	Block size in bytes.  Default: 4096.
+
+.. option:: numruns=int
+	:noindex:
+
+	Number of runs.
+
+.. option:: dir=str
+	:noindex:
+
+	Test directory.
+
+.. option:: threads=int
+	:noindex:
+
+	Number of threads.
 
 Interpreting the output
 -----------------------
@@ -2797,7 +2942,7 @@ Interpreting the output
 Fio spits out a lot of output. While running, fio will display the status of the
 jobs created. An example of that would be::
 
-    Jobs: 1: [_r] [24.8% done] [r=20992KiB/s,w=24064KiB/s,t=0KiB/s] [r=82,w=94,t=0 iops] [eta 00h:01m:31s]
+    Jobs: 1 (f=1): [_(1),M(1)][24.8%][r=20.5MiB/s,w=23.5MiB/s][r=82,w=94 IOPS][eta 01m:31s]
 
 The characters inside the square brackets denote the current status of each
 thread. The possible values (in typical life cycle order) are:
@@ -2842,14 +2987,15 @@ Fio will condense the thread string as not to take up more space on the command
 line as is needed. For instance, if you have 10 readers and 10 writers running,
 the output would look like this::
 
-    Jobs: 20 (f=20): [R(10),W(10)] [4.0% done] [r=20992KiB/s,w=24064KiB/s,t=0KiB/s] [r=82,w=94,t=0 iops] [eta 57m:36s]
+    Jobs: 20 (f=20): [R(10),W(10)][4.0%][r=20.5MiB/s,w=23.5MiB/s][r=82,w=94 IOPS][eta 57m:36s]
 
 Fio will still maintain the ordering, though. So the above means that jobs 1..10
 are readers, and 11..20 are writers.
 
 The other values are fairly self explanatory -- number of threads currently
-running and doing I/O, rate of I/O since last check (read speed listed first,
-then write speed), and the estimated completion percentage and time for the
+running and doing I/O, the number of currently open files (f=), the rate of I/O
+since last check (read speed listed first, then write speed and optionally trim
+speed), and the estimated completion percentage and time for the current
 running group. It's impossible to estimate runtime of the following groups (if
 any). Note that the string is displayed in order, so it's possible to tell which
 of the jobs are currently doing what. The first character is the first job

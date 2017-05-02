@@ -1233,6 +1233,9 @@ static int str_filename_cb(void *data, const char *input)
 	strip_blank_front(&str);
 	strip_blank_end(str);
 
+	/*
+	 * Ignore what we may already have from nrfiles option.
+	 */
 	if (!td->files_index)
 		td->o.nr_files = 0;
 
@@ -1882,7 +1885,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.alias	= "io_limit",
 		.lname	= "IO Size",
 		.type	= FIO_OPT_STR_VAL,
-		.off1	= offsetof(struct thread_options, io_limit),
+		.off1	= offsetof(struct thread_options, io_size),
 		.help	= "Total size of I/O to be performed",
 		.interval = 1024 * 1024,
 		.category = FIO_OPT_C_IO,
@@ -2601,6 +2604,12 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .help = "Like mmap, but use huge pages",
 			  },
 #endif
+#ifdef CONFIG_CUDA
+			  { .ival = "cudamalloc",
+			    .oval = MEM_CUDA_MALLOC,
+			    .help = "Allocate GPU device memory for GPUDirect RDMA",
+			  },
+#endif
 		  },
 	},
 	{
@@ -2670,6 +2679,22 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			  { .ival = "sha512",
 			    .oval = VERIFY_SHA512,
 			    .help = "Use sha512 checksums for verification",
+			  },
+			  { .ival = "sha3-224",
+			    .oval = VERIFY_SHA3_224,
+			    .help = "Use sha3-224 checksums for verification",
+			  },
+			  { .ival = "sha3-256",
+			    .oval = VERIFY_SHA3_256,
+			    .help = "Use sha3-256 checksums for verification",
+			  },
+			  { .ival = "sha3-384",
+			    .oval = VERIFY_SHA3_384,
+			    .help = "Use sha3-384 checksums for verification",
+			  },
+			  { .ival = "sha3-512",
+			    .oval = VERIFY_SHA3_512,
+			    .help = "Use sha3-512 checksums for verification",
 			  },
 			  { .ival = "xxhash",
 			    .oval = VERIFY_XXHASH,
@@ -3544,6 +3569,18 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.help	= "Build fio with libnuma-dev(el) to enable this option",
 	},
 #endif
+#ifdef CONFIG_CUDA
+	{
+		.name	= "gpu_dev_id",
+		.lname	= "GPU device ID",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, gpu_dev_id),
+		.help	= "Set GPU device ID for GPUDirect RDMA",
+		.def    = "0",
+		.category = FIO_OPT_C_GENERAL,
+		.group	= FIO_OPT_G_INVALID,
+	},
+#endif
 	{
 		.name	= "end_fsync",
 		.lname	= "End fsync",
@@ -3843,6 +3880,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.type	= FIO_OPT_STR_SET,
 		.off1	= offsetof(struct thread_options, group_reporting),
 		.help	= "Do reporting on a per-group basis",
+		.category = FIO_OPT_C_STAT,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "stats",
+		.lname	= "Stats",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, stats),
+		.help	= "Enable collection of stats",
+		.def	= "1",
 		.category = FIO_OPT_C_STAT,
 		.group	= FIO_OPT_G_INVALID,
 	},

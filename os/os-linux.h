@@ -16,11 +16,14 @@
 #include <linux/unistd.h>
 #include <linux/raw.h>
 #include <linux/major.h>
-#include <byteswap.h>
 
 #include "./os-linux-syscall.h"
 #include "binject.h"
 #include "../file.h"
+
+#ifndef __has_builtin         // Optional of course.
+  #define __has_builtin(x) 0  // Compatibility with non-clang compilers.
+#endif
 
 #define FIO_HAVE_CPU_AFFINITY
 #define FIO_HAVE_DISK_UTIL
@@ -32,7 +35,6 @@
 #define FIO_HAVE_HUGETLB
 #define FIO_HAVE_RAWBIND
 #define FIO_HAVE_BLKTRACE
-#define FIO_HAVE_PSHARED_MUTEX
 #define FIO_HAVE_CL_SIZE
 #define FIO_HAVE_CGROUPS
 #define FIO_HAVE_FS_STAT
@@ -220,21 +222,19 @@ static inline int fio_lookup_raw(dev_t dev, int *majdev, int *mindev)
 #define FIO_MADV_FREE	MADV_REMOVE
 #endif
 
-#if defined(__builtin_bswap16)
+/* Check for GCC or Clang byte swap intrinsics */
+#if (__has_builtin(__builtin_bswap16) && __has_builtin(__builtin_bswap32) \
+     && __has_builtin(__builtin_bswap64)) || (__GNUC__ > 4 \
+     || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)) /* fio_swapN */
 #define fio_swap16(x)	__builtin_bswap16(x)
-#else
-#define fio_swap16(x)	__bswap_16(x)
-#endif
-#if defined(__builtin_bswap32)
 #define fio_swap32(x)	__builtin_bswap32(x)
-#else
-#define fio_swap32(x)	__bswap_32(x)
-#endif
-#if defined(__builtin_bswap64)
 #define fio_swap64(x)	__builtin_bswap64(x)
 #else
-#define fio_swap64(x)	__bswap_64(x)
-#endif
+#include <byteswap.h>
+#define fio_swap16(x)	bswap_16(x)
+#define fio_swap32(x)	bswap_32(x)
+#define fio_swap64(x)	bswap_64(x)
+#endif /* fio_swapN */
 
 #define CACHE_LINE_FILE	\
 	"/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size"
@@ -349,5 +349,10 @@ static inline ssize_t pwritev2(int fd, const struct iovec *iov, int iovcnt,
 }
 #endif /* __NR_preadv2 */
 #endif /* CONFIG_PWRITEV2 */
+
+static inline int shm_attach_to_open_removed(void)
+{
+	return 1;
+}
 
 #endif

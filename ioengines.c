@@ -368,16 +368,16 @@ int td_io_init(struct thread_data *td)
 
 	if (td->io_ops->init) {
 		ret = td->io_ops->init(td);
-		if (ret && td->o.iodepth > 1) {
-			log_err("fio: io engine init failed. Perhaps try"
-				" reducing io depth?\n");
-		}
+		if (ret)
+			log_err("fio: io engine %s init failed.%s\n",
+				td->io_ops->name,
+				td->o.iodepth > 1 ?
+				" Perhaps try reducing io depth?" : "");
+		else
+			td->io_ops_init = 1;
 		if (!td->error)
 			td->error = ret;
 	}
-
-	if (!ret && td_ioengine_flagged(td, FIO_NOIO))
-		td->flags |= TD_F_NOIO;
 
 	return ret;
 }
@@ -554,64 +554,6 @@ int td_io_get_file_size(struct thread_data *td, struct fio_file *f)
 		return 0;
 
 	return td->io_ops->get_file_size(td, f);
-}
-
-static int do_sync_file_range(const struct thread_data *td,
-			      struct fio_file *f)
-{
-	off64_t offset, nbytes;
-
-	offset = f->first_write;
-	nbytes = f->last_write - f->first_write;
-
-	if (!nbytes)
-		return 0;
-
-	return sync_file_range(f->fd, offset, nbytes, td->o.sync_file_range);
-}
-
-int do_io_u_sync(const struct thread_data *td, struct io_u *io_u)
-{
-	int ret;
-
-	if (io_u->ddir == DDIR_SYNC) {
-		ret = fsync(io_u->file->fd);
-	} else if (io_u->ddir == DDIR_DATASYNC) {
-#ifdef CONFIG_FDATASYNC
-		ret = fdatasync(io_u->file->fd);
-#else
-		ret = io_u->xfer_buflen;
-		io_u->error = EINVAL;
-#endif
-	} else if (io_u->ddir == DDIR_SYNC_FILE_RANGE)
-		ret = do_sync_file_range(td, io_u->file);
-	else {
-		ret = io_u->xfer_buflen;
-		io_u->error = EINVAL;
-	}
-
-	if (ret < 0)
-		io_u->error = errno;
-
-	return ret;
-}
-
-int do_io_u_trim(const struct thread_data *td, struct io_u *io_u)
-{
-#ifndef FIO_HAVE_TRIM
-	io_u->error = EINVAL;
-	return 0;
-#else
-	struct fio_file *f = io_u->file;
-	int ret;
-
-	ret = os_trim(f->fd, io_u->offset, io_u->xfer_buflen);
-	if (!ret)
-		return io_u->xfer_buflen;
-
-	io_u->error = ret;
-	return 0;
-#endif
 }
 
 int fio_show_ioengine_help(const char *engine)

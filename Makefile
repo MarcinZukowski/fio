@@ -46,6 +46,7 @@ SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		eta.c verify.c memory.c io_u.c parse.c mutex.c options.c \
 		smalloc.c filehash.c profile.c debug.c engines/cpu.c \
 		engines/mmap.c engines/sync.c engines/null.c engines/net.c \
+		engines/ftruncate.c \
 		server.c client.c iolog.c backend.c libfio.c flow.c cconv.c \
 		gettime-thread.c helpers.c json.c idletime.c td_error.c \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
@@ -214,7 +215,6 @@ ifeq ($(CONFIG_TARGET_OS), Darwin)
   LIBS	 += -lpthread -ldl
 endif
 ifneq (,$(findstring CYGWIN,$(CONFIG_TARGET_OS)))
-  SOURCE := $(filter-out engines/mmap.c,$(SOURCE))
   SOURCE += os/windows/posix.c
   LIBS	 += -lpthread -lpsapi -lws2_32
   CFLAGS += -DPSAPI_VERSION=1 -Ios/windows/posix/include -Wno-format -static
@@ -339,7 +339,7 @@ endif
 
 all: $(PROGS) $(T_TEST_PROGS) $(SCRIPTS) FORCE
 
-.PHONY: all install clean
+.PHONY: all install clean test
 .PHONY: FORCE cscope
 
 FIO-VERSION-FILE: FORCE
@@ -495,7 +495,8 @@ doc: tools/plot/fio2gnuplot.1
 	@man -t tools/plot/fio2gnuplot.1 | ps2pdf - fio2gnuplot.pdf
 	@man -t tools/hist/fiologparser_hist.py.1 | ps2pdf - fiologparser_hist.pdf
 
-test:
+test: fio
+	./fio --minimal --thread --ioengine=null --runtime=1s --name=nulltest --rw=randrw --iodepth=2 --norandommap --random_generator=tausworthe64 --size=16T --name=verifynulltest --rw=write --verify=crc32c --verify_state_save=0 --size=100M
 
 install: $(PROGS) $(SCRIPTS) tools/plot/fio2gnuplot.1 FORCE
 	$(INSTALL) -m 755 -d $(DESTDIR)$(bindir)

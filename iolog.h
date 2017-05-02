@@ -4,7 +4,7 @@
 #include "lib/rbtree.h"
 #include "lib/ieee754.h"
 #include "flist.h"
-#include "ioengine.h"
+#include "ioengines.h"
 
 /*
  * Use for maintaining statistics
@@ -271,7 +271,7 @@ static inline bool inline_log(struct io_log *log)
 
 static inline void ipo_bytes_align(unsigned int replay_align, struct io_piece *ipo)
 {
-	if (replay_align)
+	if (!replay_align)
 		return;
 
 	ipo->offset &= ~(replay_align - (uint64_t)1);

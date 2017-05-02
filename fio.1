@@ -1,4 +1,4 @@
-.TH fio 1 "December 2016" "User Manual"
+.TH fio 1 "March 2017" "User Manual"
 .SH NAME
 fio \- flexible I/O tester
 .SH SYNOPSIS
@@ -1309,6 +1309,9 @@ Same as \fBmmap\fR, but use huge files as backing.
 .TP
 .B mmapshared
 Same as \fBmmap\fR, but use a MMAP_SHARED mapping.
+.TP
+.B cudamalloc
+Use GPU memory as the buffers for GPUDirect RDMA benchmark. The ioengine must be \fBrdma\fR.
 .RE
 .P
 The amount of memory allocated is the maximum allowed \fBblocksize\fR for the
@@ -1414,7 +1417,7 @@ option.  The allowed values are:
 .RS
 .RS
 .TP
-.B md5 crc16 crc32 crc32c crc32c-intel crc64 crc7 sha256 sha512 sha1 xxhash
+.B md5 crc16 crc32 crc32c crc32c-intel crc64 crc7 sha256 sha512 sha1 sha3-224 sha3-256 sha3-384 sha3-512 xxhash
 Store appropriate checksum in the header of each block. crc32c-intel is
 hardware accelerated SSE4.2 driven, falls back to regular crc32c if
 not supported by the system.
@@ -1547,6 +1550,10 @@ Wait for preceding jobs in the job file to exit before starting this one.
 .B new_group
 Start a new reporting group.  If not given, all jobs in a file will be part
 of the same reporting group, unless separated by a stonewall.
+.TP
+.BI stats \fR=\fPbool
+By default, fio collects and shows final output results for all jobs that run.
+If this option is set to 0, then fio will ignore it in the final stat output.
 .TP
 .BI numjobs \fR=\fPint
 Number of clones (processes/threads performing the same workload) of this job.
@@ -2584,3 +2591,10 @@ See \fBREADME\fR.
 For further documentation see \fBHOWTO\fR and \fBREADME\fR.
 .br
 Sample jobfiles are available in the \fBexamples\fR directory.
+.br
+These are typically located under /usr/share/doc/fio.
+
+\fBHOWTO\fR:  http://git.kernel.dk/?p=fio.git;a=blob_plain;f=HOWTO
+.br
+\fBREADME\fR: http://git.kernel.dk/?p=fio.git;a=blob_plain;f=README
+.br

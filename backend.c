@@ -776,8 +776,8 @@ static bool io_bytes_exceeded(struct thread_data *td, uint64_t *this_bytes)
 	else
 		bytes = this_bytes[DDIR_TRIM];
 
-	if (td->o.io_limit)
-		limit = td->o.io_limit;
+	if (td->o.io_size)
+		limit = td->o.io_size;
 	else
 		limit = td->o.size;
 
@@ -811,13 +811,14 @@ static long long usec_for_io(struct thread_data *td, enum fio_ddir ddir)
 		uint64_t val;
 		iops = bps / td->o.bs[ddir];
 		val = (int64_t) (1000000 / iops) *
-				-logf(__rand_0_1(&td->poisson_state));
+				-logf(__rand_0_1(&td->poisson_state[ddir]));
 		if (val) {
-			dprint(FD_RATE, "poisson rate iops=%llu\n",
-					(unsigned long long) 1000000 / val);
+			dprint(FD_RATE, "poisson rate iops=%llu, ddir=%d\n",
+					(unsigned long long) 1000000 / val,
+					ddir);
 		}
-		td->last_usec += val;
-		return td->last_usec;
+		td->last_usec[ddir] += val;
+		return td->last_usec[ddir];
 	} else if (bps) {
 		secs = bytes / bps;
 		remainder = bytes % bps;
@@ -851,11 +852,11 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 
 	total_bytes = td->o.size;
 	/*
-	* Allow random overwrite workloads to write up to io_limit
+	* Allow random overwrite workloads to write up to io_size
 	* before starting verification phase as 'size' doesn't apply.
 	*/
 	if (td_write(td) && td_random(td) && td->o.norandommap)
-		total_bytes = max(total_bytes, (uint64_t) td->o.io_limit);
+		total_bytes = max(total_bytes, (uint64_t) td->o.io_size);
 	/*
 	 * If verify_backlog is enabled, we'll run the verify in this
 	 * handler as well. For that case, we may need up to twice the
@@ -1355,8 +1356,8 @@ static bool keep_running(struct thread_data *td)
 	if (exceeds_number_ios(td))
 		return false;
 
-	if (td->o.io_limit)
-		limit = td->o.io_limit;
+	if (td->o.io_size)
+		limit = td->o.io_size;
 	else
 		limit = td->o.size;
 
@@ -1371,7 +1372,7 @@ static bool keep_running(struct thread_data *td)
 		if (diff < td_max_bs(td))
 			return false;
 
-		if (fio_files_done(td) && !td->o.io_limit)
+		if (fio_files_done(td) && !td->o.io_size)
 			return false;
 
 		return true;
@@ -1456,6 +1457,7 @@ static void *thread_main(void *data)
 	struct thread_data *td = fd->td;
 	struct thread_options *o = &td->o;
 	struct sk_out *sk_out = fd->sk_out;
+	uint64_t bytes_done[DDIR_RWDIR_CNT];
 	int deadlock_loop_cnt;
 	int clear_state;
 	int ret;
@@ -1677,7 +1679,9 @@ static void *thread_main(void *data)
 					sizeof(td->bw_sample_time));
 	}
 
+	memset(bytes_done, 0, sizeof(bytes_done));
 	clear_state = 0;
+
 	while (keep_running(td)) {
 		uint64_t verify_bytes;
 
@@ -1693,11 +1697,9 @@ static void *thread_main(void *data)
 
 		prune_io_piece_log(td);
 
-		if (td->o.verify_only && (td_write(td) || td_rw(td)))
+		if (td->o.verify_only && td_write(td))
 			verify_bytes = do_dry_run(td);
 		else {
-			uint64_t bytes_done[DDIR_RWDIR_CNT];
-
 			do_io(td, bytes_done);
 
 			if (!ddir_rw_sum(bytes_done)) {
@@ -1776,6 +1778,18 @@ static void *thread_main(void *data)
 			break;
 	}
 
+	/*
+	 * If td ended up with no I/O when it should have had,
+	 * then something went wrong unless FIO_NOIO or FIO_DISKLESSIO.
+	 * (Are we not missing other flags that can be ignored ?)
+	 */
+	if ((td->o.size || td->o.io_size) && !ddir_rw_sum(bytes_done) &&
+	    !(td_ioengine_flagged(td, FIO_NOIO) ||
+	      td_ioengine_flagged(td, FIO_DISKLESSIO)))
+		log_err("%s: No I/O performed by %s, "
+			 "perhaps try --debug=io option for details?\n",
+			 td->o.name, td->io_ops->name);
+
 	td_set_runstate(td, TD_FINISHING);
 
 	update_rusage_stat(td);
@@ -1836,9 +1850,6 @@ err:
 	if (o->write_iolog_file)
 		write_iolog_close(td);
 
-	fio_mutex_remove(td->mutex);
-	td->mutex = NULL;
-
 	td_set_runstate(td, TD_EXITED);
 
 	/*
@@ -1849,14 +1860,6 @@ err:
 
 	sk_out_drop();
 	return (void *) (uintptr_t) td->error;
-}
-
-static void dump_td_info(struct thread_data *td)
-{
-	log_err("fio: job '%s' (state=%d) hasn't exited in %lu seconds, it "
-		"appears to be stuck. Doing forceful exit of this job.\n",
-			td->o.name, td->runstate,
-			(unsigned long) time_since_now(&td->terminate_time));
 }
 
 /*
@@ -1943,7 +1946,11 @@ static void reap_threads(unsigned int *nr_running, uint64_t *t_rate,
 		if (td->terminate &&
 		    td->runstate < TD_FSYNCING &&
 		    time_since_now(&td->terminate_time) >= FIO_REAP_TIMEOUT) {
-			dump_td_info(td);
+			log_err("fio: job '%s' (state=%d) hasn't exited in "
+				"%lu seconds, it appears to be stuck. Doing "
+				"forceful exit of this job.\n",
+				td->o.name, td->runstate,
+				(unsigned long) time_since_now(&td->terminate_time));
 			td_set_runstate(td, TD_REAPED);
 			goto reaped;
 		}
@@ -2056,8 +2063,16 @@ static bool check_mount_writes(struct thread_data *td)
 	if (!td_write(td) || td->o.allow_mounted_write)
 		return false;
 
+	/*
+	 * If FIO_HAVE_CHARDEV_SIZE is defined, it's likely that chrdevs
+	 * are mkfs'd and mounted.
+	 */
 	for_each_file(td, f, i) {
+#ifdef FIO_HAVE_CHARDEV_SIZE
+		if (f->filetype != FIO_TYPE_BLOCK && f->filetype != FIO_TYPE_CHAR)
+#else
 		if (f->filetype != FIO_TYPE_BLOCK)
+#endif
 			continue;
 		if (device_is_mounted(f->file_name))
 			goto mounted;
@@ -2427,6 +2442,8 @@ int fio_backend(struct sk_out *sk_out)
 			fio_mutex_remove(td->rusage_sem);
 			td->rusage_sem = NULL;
 		}
+		fio_mutex_remove(td->mutex);
+		td->mutex = NULL;
 	}
 
 	free_disk_util();
