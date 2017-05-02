@@ -319,6 +319,15 @@ void gas_init_async(struct thread_data *td, void (*worker)(void*))
   d->worker= worker;
 }
 
+static int gas_cancel(struct thread_data *td, struct io_u *io_u)
+{
+  struct gas_data *ld = td->io_ops_data;
+
+  printf("Received cancel\n"); fflush(stdout);
+
+  return -1;
+}
+
 void gas_register_async(struct ioengine_ops *ops)
 {
   assert(ops->init);
@@ -328,6 +337,7 @@ void gas_register_async(struct ioengine_ops *ops)
   ops->commit = fio_gas_commit;
   ops->getevents = fio_gas_getevents;
   ops->event = fio_gas_event;
+  ops->cancel = gas_cancel;
 
   register_ioengine(ops);
 }
@@ -339,17 +349,18 @@ static int gas_init(struct thread_data *td)
   return 0;
 }
 
-
 static struct ioengine_ops gas_ioengine = {
-    .name			= "gas",
-    .version		= FIO_IOOPS_VERSION,
-    .init			= gas_init,
+    .name			          = "gas",
+    .version		        = FIO_IOOPS_VERSION,
 
-    .open_file		= generic_open_file,
-    .close_file		= generic_close_file,
-    .get_file_size		= generic_get_file_size,
+    .init			          = gas_init,
+
+    .open_file		      = generic_open_file,
+    .close_file		      = generic_close_file,
+    .get_file_size      = generic_get_file_size,
+    .cancel             = gas_cancel,
     .option_struct_size	= sizeof(struct gas_options),
-    .options		= options,
+    .options		        = options,
 //	.flags			= FIO_DISKLESSIO
 };
 

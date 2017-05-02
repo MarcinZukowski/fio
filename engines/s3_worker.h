@@ -7,8 +7,13 @@
 extern "C" {
 #endif
 
+struct s3_config
+{
+  char *region;
+};
+
 void s3_init();
-int s3_read(void **backend_data, const char *fname, size_t offset, size_t size);
+int s3_read(struct s3_config *config, void **backend_data, const char *fname, size_t offset, size_t size);
 
 
 #ifdef __cplusplus

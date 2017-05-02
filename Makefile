@@ -64,6 +64,7 @@ ifdef CONFIG_LIBHDFS
 endif
 
   SOURCE += engines/gas.c
+  SOURCE += engines/gas-silly-io.c
   SOURCE += engines/thpool.c
 
   SOURCE += engines/s3.c

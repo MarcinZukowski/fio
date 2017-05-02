@@ -11,26 +11,28 @@ static int s3_common_init()
   return 0;
 }
 
-/**
- * Options state for GAS
- */
-struct s3_options {
-  void *pad;
-  unsigned int timeout;
-};
+static struct s3_config s3_config = { NULL };
 
 /**
  * S3 options definitions
  */
-static struct fio_option options[] = {
+static int str_region_cb(void *data, const char *input)
+{
+  if (s3_config.region)
+    free(s3_config.region);
+  s3_config.region = strdup(input);
+  return 0;
+}
+
+struct fio_option options[] = {
     {
-      .name	= "s3_timeout",
-      .lname	= "S3 request timeout",
-      .type	= FIO_OPT_INT,
-      .off1	= offsetof(struct s3_options, timeout),
-      .help	= "How long we wait before canceling an S3 request",
+      .name	= "s3_region",
+      .lname	= "AWS Region, e.g. 'us-west-2'",
+      .type	= FIO_OPT_STR_STORE,
+      .cb	= str_region_cb,
+      .help	= "Which region to use",
       .category = FIO_OPT_C_ENGINE,
-      .group	= FIO_OPT_G_LIBAIO,
+      .group	= FIO_OPT_G_GAS,
     },
     {
         .name	= NULL,
@@ -43,7 +45,7 @@ static void perform_work(void *arg)
 
   struct io_u *io_u = gas_io->io_u;
 
-  s3_read(&gas_io->backend_data, io_u->file->file_name, io_u->offset, io_u->xfer_buflen);
+  s3_read(&s3_config, &gas_io->backend_data, io_u->file->file_name, io_u->offset, io_u->xfer_buflen);
 }
 
 static int s3_open_file(struct thread_data *td, struct fio_file *f)
@@ -75,7 +77,7 @@ static struct ioengine_ops s3_ioengine_async = {
     .open_file		= s3_open_file,
     .close_file		= s3_close_file,
 //    .get_file_size		= generic_get_file_size,
-    .option_struct_size	= sizeof(struct s3_options),
+    .option_struct_size	= sizeof(options),
     .options		= options,
   	.flags			= FIO_DISKLESSIO | FIO_NODISKUTIL | FIO_FAKEIO
 };

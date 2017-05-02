@@ -20,7 +20,7 @@ void s3_init()
   Aws::InitAPI(options);
 }
 
-int s3_read(void **backend_data, const char *fname, size_t offset, size_t size)
+int s3_read(struct s3_config *s3_config, void **backend_data, const char *fname, size_t offset, size_t size)
 {
   size_t len = strlen(fname) + 1;
   char *str = alloca(len);
@@ -46,12 +46,16 @@ int s3_read(void **backend_data, const char *fname, size_t offset, size_t size)
     printf("Creating new S3Client\n");
     fflush(stdout);
 
-    s3_client = new Aws::S3::S3Client();
-//    *backend_data = s3_client;
+    Aws::Client::ClientConfiguration config;
+    if (s3_config->region) {
+      config.region = s3_config->region;
+    }
+//    config.endpointOverride= "s3-us-west-2.amazonaws.com";
+    s3_client = new Aws::S3::S3Client(config);
   }
 
   char *range = alloca(1000);
-  sprintf(range, "bytes=%lld-%lld", offset, offset + size - 1);
+  sprintf(range, "bytes=%zd-%zd", offset, offset + size - 1);
 
   Aws::S3::Model::GetObjectRequest object_request;
   object_request.WithBucket(bucket_name).WithKey(key_name);
@@ -71,6 +75,8 @@ int s3_read(void **backend_data, const char *fname, size_t offset, size_t size)
               get_object_outcome.GetError().GetExceptionName() << " " <<
               get_object_outcome.GetError().GetMessage() << std::endl;
   }
+
+  return 0;
 }
 
 }  // extern C
