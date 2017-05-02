@@ -120,9 +120,10 @@ struct io_u {
 #ifdef CONFIG_RDMA
 		struct ibv_mr *mr;
 #endif
-		void *mmap_data;
-
+#ifdef CONFIG_GAS
 		struct gas_io *gas_io;
+#endif
+		void *mmap_data;
 	};
 };
 

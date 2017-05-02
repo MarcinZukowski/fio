@@ -33,14 +33,6 @@ int s3_read(struct s3_config *s3_config, void **backend_data, const char *fname,
   const Aws::String bucket_name = str ;
   const Aws::String key_name = slash + 1;
 
-//  printf("Reading '%s'  /  '%s'   %lld:%lld\n", bucket_name.c_str(), key_name.c_str(), offset, size);
-
-//  Aws::Client::ClientConfiguration config;
-//  config.region = "us-west-2";
-//  config.endpointOverride= "http://s3-us-west-2.amazonaws.com";
-
-//  Aws::S3::S3Client *s3_client = *backend_data;
-
   if (s3_client == nullptr)
   {
     if (s3_config->verbose) {
@@ -52,7 +44,6 @@ int s3_read(struct s3_config *s3_config, void **backend_data, const char *fname,
     if (s3_config->region) {
       clientConfig.region = s3_config->region;
     }
-//    config.endpointOverride= "s3-us-west-2.amazonaws.com";
     s3_client = new Aws::S3::S3Client(clientConfig);
   }
 

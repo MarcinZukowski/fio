@@ -77,13 +77,6 @@ ifdef CONFIG_S3AWSSDK
   CPP_SOURCE += engines/s3_worker.cpp
 endif
 
-# Add gas files
-#  LIBS += -L $(AWS_SDK)/lib/ -laws-cpp-sdk-s3 -laws-cpp-sdk-core
-
-#  AWS_SDK = /home/mzukowski/src/asy/aws-install/
-#  CXXFLAGS += -I $(AWS_SDK)/include/
-#  LINK = $(CXX)
-
 # Choose what we use for linking. If anything is compiled with C++, use CXX
 ifeq ($(CPP_SOURCE),"")
 	LINK=$(CC)
