@@ -313,8 +313,8 @@ PROGS += $(T_PROGS)
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
-#	QUIET_CC	= @echo '   ' CC $@;
-#	QUIET_LINK	= @echo ' ' LINK $@;
+	QUIET_CC	= @echo '   ' CC $@;
+	QUIET_LINK	= @echo ' ' LINK $@;
 	QUIET_DEP	= @echo '  ' DEP $@;
 	QUIET_YACC	= @echo ' ' YACC $@;
 	QUIET_LEX	= @echo '  ' LEX $@;
