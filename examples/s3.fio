@@ -1,0 +1,25 @@
+[s3]
+ioengine=s3
+
+# Point to a file in S3, without the "s3://" prefix.
+# If it's not publicly available, you need your AWS credentials set in the environment.
+filename=YOUR_BUCKET/1-gb-random-data
+
+# Optionally, specify your region.
+# s3_region=us-west-2
+
+# Set if you want to do more logging.
+# s3_verbose=1
+
+# Read-only support for now.
+rw=randread
+allow_file_create=0
+
+# Example depth / size configuration.
+numjobs=1
+iodepth=8
+bs=1m
+size=1g
+
+time_based=1
+runtime=5

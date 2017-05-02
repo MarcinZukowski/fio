@@ -60,3 +60,13 @@ Fixed rate submission
 
 .. literalinclude:: ../examples/fixed-rate-submission.fio
 	:language: ini
+
+Testing S3 access
+---------------------
+
+.. only:: builder_html
+
+:download:`Download s3.fio <../examples/s3.fio>`
+
+.. literalinclude:: ../examples/s3.fio
+	:language: ini

@@ -1732,6 +1732,12 @@ I/O engine
 			Read and write using device DAX to a persistent memory device (e.g.,
 			/dev/dax0.0) through the NVML libpmem library.
 
+		**gas-direct-io**
+			Read-only engine using the GAS (Generic ASynchronous) framework for FIO.
+
+		**s3**
+			Read-only engine for S3, using GAS and AWS SDK.
+
 		**external**
 			Prefix to specify loading an external I/O engine object file. Append
 			the engine filename, e.g. ``ioengine=external:/tmp/foo.o`` to load
@@ -1899,6 +1905,14 @@ caveat that when used on the command line, they must come after the
 .. option:: chunk_size : [libhdfs]
 
 	the size of the chunk to use for each file.
+
+.. option:: s3_region=str : [s3]
+
+	The name of the region to be used, e.g. "us-west-2".
+
+.. option:: s3_verbose=bool : [s3]
+
+	If set, the s3 engine will be more verbose.
 
 
 I/O depth
