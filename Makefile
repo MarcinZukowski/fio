@@ -39,8 +39,6 @@ ifdef CONFIG_GFIO
 endif
 
 CXXFLAGS = -std=c++11 -fpermissive $(OPTFLAGS)  -I. -I$(SRCDIR) $(CFLAGS)
-#-Wwrite-strings -Wall $(EXTFLAGS) $(BUILD_CFLAGS)
-LINK=$(CC)
 
 SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/lib/*.c)) \
@@ -53,7 +51,8 @@ SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
 		workqueue.c rate-submit.c optgroup.c helper_thread.c \
 		steadystate.c
-		
+
+# List of compiled C++ files
 CPP_SOURCE := 
 
 ifdef CONFIG_LIBHDFS
@@ -63,17 +62,33 @@ ifdef CONFIG_LIBHDFS
   SOURCE += engines/libhdfs.c
 endif
 
+ifdef CONFIG_GAS
   SOURCE += engines/gas.c
-  SOURCE += engines/gas-silly-io.c
+  SOURCE += engines/gas-direct-io.c
   SOURCE += engines/thpool.c
+endif
 
+ifdef CONFIG_S3AWSSDK
+  S3AWSSDK_FLAGS= -I $(FIO_AWSSDK)/include
+  S3AWSSDK_LIBS += -L $(FIO_AWSSDK)/lib -laws-cpp-sdk-s3 -laws-cpp-sdk-core
+  CXXFLAGS += $(S3AWSSDK_FLAGS)
   SOURCE += engines/s3.c
   CPP_SOURCE += engines/s3_worker.cpp
-  LIBS += -L $(AWS_SDK)/lib/ -laws-cpp-sdk-s3 -laws-cpp-sdk-core
+endif
 
-  AWS_SDK = /home/mzukowski/src/asy/aws-install/
-  CXXFLAGS += -I $(AWS_SDK)/include/
-  LINK = $(CXX)
+# Add gas files
+#  LIBS += -L $(AWS_SDK)/lib/ -laws-cpp-sdk-s3 -laws-cpp-sdk-core
+
+#  AWS_SDK = /home/mzukowski/src/asy/aws-install/
+#  CXXFLAGS += -I $(AWS_SDK)/include/
+#  LINK = $(CXX)
+
+# Choose what we use for linking. If anything is compiled with C++, use CXX
+ifeq ($(CPP_SOURCE),"")
+	LINK=$(CC)
+else
+	LINK=$(CXX)
+endif
 
 ifdef CONFIG_64BIT_LLP64
   CFLAGS += -DBITS_PER_LONG=32
@@ -433,7 +448,7 @@ t/ieee754: $(T_IEEE_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_IEEE_OBJS) $(LIBS)
 
 fio: $(FIO_OBJS)
-	$(QUIET_LINK)$(LINK) $(LDFLAGS) $(CFLAGS) -o $@ $(FIO_OBJS) $(LIBS) $(HDFSLIB)
+	$(QUIET_LINK)$(LINK) $(LDFLAGS) $(CFLAGS) -o $@ $(FIO_OBJS) $(LIBS) $(HDFSLIB) $(S3AWSSDK_LIBS)
 
 gfio: $(GFIO_OBJS)
 	$(QUIET_LINK)$(CC) $(filter-out -static, $(LDFLAGS)) -o gfio $(GFIO_OBJS) $(LIBS) $(GFIO_LIBS) $(GTK_LDFLAGS) $(HDFSLIB)

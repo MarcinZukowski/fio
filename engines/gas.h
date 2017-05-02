@@ -1,12 +1,15 @@
+/**
+ * GAS - Generic ASync framework.
+ * Can be used to add (async) testing to fio for any kind of request
+ * (e.g. disk, network, web etc).
+ */
+
 #include <pthread.h>
 
 #include "../fio.h"
 
 // From https://github.com/Pithikos/C-Thread-Pool
 #include "thpool.h"
-
-// #define pr(x...) printf(x)
-#define pr(x...)
 
 /**
  * Queue of pointers

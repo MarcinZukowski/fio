@@ -135,6 +135,8 @@ show_help="no"
 exit_val=0
 gfio_check="no"
 libhdfs="no"
+gas="yes"
+s3awssdk="no"
 pmemblk="no"
 devdax="no"
 disable_lex=""
@@ -174,6 +176,10 @@ for opt do
   ;;
   --enable-libhdfs) libhdfs="yes"
   ;;
+  --disable-gas) gas="no"
+  ;;
+  --enable-s3awssdk) s3awssdk="yes"
+  ;;
   --disable-lex) disable_lex="yes"
   ;;
   --enable-lex) disable_lex="no"
@@ -206,6 +212,8 @@ if test "$show_help" = "yes" ; then
   echo "--disable-numa         Disable libnuma even if found"
   echo "--disable-gfapi        Disable gfapi"
   echo "--enable-libhdfs       Enable hdfs support"
+  echo "--disable-gas          Disable GAS backend and related components"
+  echo "--enable-s3awssdk      Enable S3 engine using AWS SDK and GAS"
   echo "--disable-lex          Disable use of lex/yacc for math"
   echo "--disable-pmem         Disable pmem based engines even if found"
   echo "--enable-lex           Enable use of lex/yacc for math"
@@ -1542,7 +1550,7 @@ if test "$libhdfs" = "yes" ; then
     hdfs_conf_error=1
   fi
   if test "$FIO_LIBHDFS_INCLUDE" = "" ; then
-    echo "configure: FIO_LIBHDFS_INCLUDE should be defined to libhdfs inlude path"
+    echo "configure: FIO_LIBHDFS_INCLUDE should be defined to libhdfs include path"
     hdfs_conf_error=1
   fi
   if test "$FIO_LIBHDFS_LIB" = "" ; then
@@ -1558,6 +1566,25 @@ if test "$libhdfs" = "yes" ; then
   fi
 fi
 echo "HDFS engine                   $libhdfs"
+
+##########################################
+# Check if we have proper config for AWS SDK
+if test "$s3awssdk" = "yes" ; then
+  s3_conf_error=0
+  if test "$gas" != "yes" ; then
+    echo "configure: gas needs to be enabled for s3awssdk"
+    s3awssdk_conf_error=1
+  fi
+  if test "$FIO_AWSSDK" = "" ; then
+    echo "configure: FIO_AWSSDK should be defined to the AWS SDK path"
+    s3awssdk_conf_error=1
+  fi
+  if test "$s3awssdk_conf_error" = "1" ; then
+    exit 1
+  fi
+fi
+echo "GAS                           $gas"
+echo "S3 engine using AWS SDK       $s3awssdk"
 
 ##########################################
 # Check whether we have MTD
@@ -1997,6 +2024,13 @@ if test "$libhdfs" = "yes" ; then
   echo "JAVA_HOME=$JAVA_HOME" >> $config_host_mak
   echo "FIO_LIBHDFS_INCLUDE=$FIO_LIBHDFS_INCLUDE" >> $config_host_mak
   echo "FIO_LIBHDFS_LIB=$FIO_LIBHDFS_LIB" >> $config_host_mak
+ fi
+if test "$gas" = "yes" ; then
+  output_sym "CONFIG_GAS"
+fi
+if test "$s3awssdk" = "yes" ; then
+  output_sym "CONFIG_S3AWSSDK"
+  echo "FIO_AWSSDK=$FIO_AWSSDK" >> $config_host_mak
  fi
 if test "$mtd" = "yes" ; then
   output_sym "CONFIG_MTD"

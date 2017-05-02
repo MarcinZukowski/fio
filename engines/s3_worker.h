@@ -9,12 +9,15 @@ extern "C" {
 
 struct s3_config
 {
+  int padding;  // so offset is not zero
   char *region;
+  int verbose;
 };
 
 void s3_init();
-int s3_read(struct s3_config *config, void **backend_data, const char *fname, size_t offset, size_t size);
 
+// Return 0 on success, 1 on error
+int s3_read(struct s3_config *config, void **backend_data, const char *fname, size_t offset, size_t size);
 
 #ifdef __cplusplus
 }

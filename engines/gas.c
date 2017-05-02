@@ -16,7 +16,6 @@
 #include "../optgroup.h"
 #include "../io_ddir.h"
 
-
 /**
  * Allocate a new QOP
  * @return
@@ -69,22 +68,12 @@ int qop_used(qop *q)
  */
 struct gas_options {
 	void *pad;
-	unsigned int timeout;
 };
 
 /**
  * GAS options definitions
  */
 static struct fio_option options[] = {
-	{
-		.name	= "timeout",
-		.lname	= "S3 request timeout",
-		.type	= FIO_OPT_INT,
-		.off1	= offsetof(struct gas_options, timeout),
-		.help	= "How long we wait before canceling an S3 request",
-		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
-	},
 	{
 		.name	= NULL,
 	},
@@ -99,8 +88,6 @@ static int fio_gas_init(struct thread_data *td)
 	struct gas_options *o = td->eo;
 	struct gas_data *d = td->io_ops_data;
 	int res;
-
-	pr("fio_gas_init: timeout=%d\n", o->timeout);
 
 	assert(d == NULL);
 	d = calloc(1, sizeof(*d));
@@ -130,7 +117,6 @@ static int fio_gas_prep(struct thread_data *td, struct io_u *io_u)
 {
 	struct gas_io* io = io_u->gas_io;
 	struct gas_data *d = td->io_ops_data;
-  pr("fio_gas_prep: io_u  = %p\n", io_u);
 
 	if (!io) {
 		io = malloc(sizeof(*io));
@@ -157,7 +143,6 @@ static int fio_gas_queue(struct thread_data *td, struct io_u *io_u)
 	struct gas_data *d = td->io_ops_data;
   struct gas_io *gas_io;
 
-  pr("fio_gas_queue: io_u  = %p\n", io_u);
 
 	fio_ro_check(td, io_u);
 
@@ -213,8 +198,6 @@ static void worker_wrapper(void *arg)
 
   int du;
 
-  pr("perform_work: started on  io_u = %p\n", gas_io->io_u);
-
   // Call the actual worker
   d->worker(arg);
 
@@ -222,8 +205,6 @@ static void worker_wrapper(void *arg)
   qop_push(d->done_gas_ios, gas_io);
   du = d->done_gas_ios->used;
 	pthread_mutex_unlock(&d->done_mutex);
-
-  pr("perform_work: finished on io_u = %p done_used=%d\n", gas_io->io_u, du);
 }
 
 static void sleepy_worker(void *arg)
@@ -238,8 +219,6 @@ static int fio_gas_commit(struct thread_data *td)
 {
 	struct gas_data *d = td->io_ops_data;
 	int ret = 0;
-
-  pr("fio_gas_commit\n");
 
   while (qop_used(d->queued_io_us)) {
 		struct io_u *io_u = qop_pop(d->queued_io_us);
@@ -261,8 +240,6 @@ static int fio_gas_getevents(struct thread_data *td, unsigned int min,
 	struct gas_data *d = td->io_ops_data;
 	int events = 0;
 
-  pr("fio_gas_getevents: min=%d max=%d\n", min, max);
-
 	assert(0 <= min);
 	assert(min <= max && 0 < max);
 
@@ -270,7 +247,6 @@ static int fio_gas_getevents(struct thread_data *td, unsigned int min,
     int take;
 
 		pthread_mutex_lock(&d->done_mutex);
-    pr("fio_gas_getevents: done_used=%d\n", d->done_gas_ios->used);
     take = d->done_gas_ios->used;
     if (events + take > max)
       take = max - events;
@@ -284,12 +260,10 @@ static int fio_gas_getevents(struct thread_data *td, unsigned int min,
 		pthread_mutex_unlock(&d->done_mutex);
 		if (events < min)
 		{
-      pr("fio_gas_getevents: sleeping\n");
 			usleep(10);
 		}
 	} while (events < min);
 
-  pr("fio_gas_getevents: return %d\n", events);
   return events;
 }
 
@@ -303,8 +277,6 @@ static struct io_u *fio_gas_event(struct thread_data *td, int event)
   assert (event < d->last_done_used);
 
 	io_u = d->last_done_gas_ios[event]->io_u;
-	io_u->error = 0;
-  pr("fio_gas_getevent: event=%d last_done_used=%d returning %p\n", event, d->last_done_used, io_u);
 
 	return io_u;
 }
