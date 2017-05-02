@@ -803,6 +803,15 @@ example job file to create such files, use rw=write option). Please note, you
 might want to set necessary environment variables to work with hdfs/libhdfs
 properly.
 .TP
+.B gas-direct-io
+A simple read-only direct-IO engine built using the GAS framework.
+.TP
+.B s3
+Read-only access to S3, built using the GAS framework.
+The \fBfilename\fR should be in form "bucket/path".
+Additionally, \fBs3_region\fR can be configured to access a specific AWS
+region, e.g., "us-west-2".
+.TP
 .B mtd
 Read, write and erase an MTD character device (e.g., /dev/mtd0). Discards are
 treated as erases. Depending on the underlying device type, the I/O may have
