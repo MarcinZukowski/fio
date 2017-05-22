@@ -43,7 +43,7 @@ Deprecated, use \-\-output-format instead to select multiple formats.
 Display version information and exit.
 .TP
 .BI \-\-terse\-version \fR=\fPversion
-Set terse version output format (Current version 3, or older version 2).
+Set terse version output format (default 3, or 2 or 4)
 .TP
 .B \-\-help
 Display usage information and exit.
@@ -533,7 +533,7 @@ bs=256k    means 256k for reads, writes and trims
 bs=8k,32k  means 8k for reads, 32k for writes and trims
 bs=8k,32k, means 8k for reads, 32k for writes, and default for trims
 bs=,8k     means default for reads, 8k for writes and trims
-bs=,8k,    means default for reads, 8k for writes, and default for writes
+bs=,8k,    means default for reads, 8k for writes, and default for trims
 .fi
 .TP
 .BI blocksize_range \fR=\fPirange[,irange][,irange] "\fR,\fB bsrange" \fR=\fPirange[,irange][,irange]
