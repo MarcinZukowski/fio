@@ -71,7 +71,7 @@ endif
 
 ifdef CONFIG_S3AWSSDK
   S3AWSSDK_FLAGS= -I $(FIO_AWSSDK)/include
-  S3AWSSDK_LIBS += -L $(FIO_AWSSDK)/lib -laws-cpp-sdk-s3 -laws-cpp-sdk-core
+  S3AWSSDK_LIBS += -L $(FIO_AWSSDK)/lib -L $(FIO_AWSSDK)/lib64 -laws-cpp-sdk-s3 -laws-cpp-sdk-core
   CXXFLAGS += $(S3AWSSDK_FLAGS)
   SOURCE += engines/s3.c
   CPP_SOURCE += engines/s3_worker.cpp
