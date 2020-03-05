@@ -141,7 +141,7 @@ show_help="no"
 exit_val=0
 gfio_check="no"
 libhdfs="no"
-gas="yes"
+gas="no"
 s3awssdk="no"
 pmemblk="no"
 devdax="no"
@@ -193,7 +193,7 @@ for opt do
   ;;
   --enable-libhdfs) libhdfs="yes"
   ;;
-  --disable-gas) gas="no"
+  --enable-gas) gas="yes"
   ;;
   --enable-s3awssdk) s3awssdk="yes"
   ;;
@@ -248,7 +248,7 @@ if test "$show_help" = "yes" ; then
   echo "--disable-http          Disable HTTP support even if found"
   echo "--disable-gfapi         Disable gfapi"
   echo "--enable-libhdfs        Enable hdfs support"
-  echo "--disable-gas           Disable GAS backend and related components"
+  echo "--enable-gas            Enable GAS backend and related components"
   echo "--enable-s3awssdk       Enable S3 engine using AWS SDK and GAS"
   echo "--disable-lex           Disable use of lex/yacc for math"
   echo "--disable-pmem          Disable pmem based engines even if found"
