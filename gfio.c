@@ -18,12 +18,13 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
 #include <locale.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <string.h>
+#include <libgen.h>
 
 #include <glib.h>
 #include <cairo.h>
@@ -37,7 +38,7 @@
 #include "gclient.h"
 #include "graph.h"
 
-static int gfio_server_running;
+static bool gfio_server_running;
 static unsigned int gfio_graph_limit = 100;
 
 GdkColor gfio_color_white;
@@ -460,10 +461,10 @@ static int send_job_file(struct gui_entry *ge)
 static void *server_thread(void *arg)
 {
 	fio_server_create_sk_key();
-	is_backend = 1;
-	gfio_server_running = 1;
+	is_backend = true;
+	gfio_server_running = true;
 	fio_start_server(NULL);
-	gfio_server_running = 0;
+	gfio_server_running = false;
 	fio_server_destroy_sk_key();
 	return NULL;
 }
@@ -471,7 +472,7 @@ static void *server_thread(void *arg)
 static void gfio_start_server(struct gui *ui)
 {
 	if (!gfio_server_running) {
-		gfio_server_running = 1;
+		gfio_server_running = true;
 		pthread_create(&ui->server_t, NULL, server_thread, NULL);
 		pthread_detach(ui->server_t);
 	}
@@ -1243,7 +1244,7 @@ static void about_dialog(GtkWidget *w, gpointer data)
 		"website", "http://git.kernel.dk/cgit/fio/",
 		"authors", authors,
 		"version", fio_version_string,
-		"copyright", "© 2012 Jens Axboe <axboe@kernel.dk>",
+		"copyright", "© 2012-2017 Jens Axboe <axboe@kernel.dk>",
 		"logo-icon-name", "fio",
 		/* Must be last: */
 		"wrap-license", TRUE,

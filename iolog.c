@@ -4,7 +4,6 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <libgen.h>
 #include <assert.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -15,10 +14,18 @@
 
 #include "flist.h"
 #include "fio.h"
-#include "verify.h"
 #include "trim.h"
 #include "filelock.h"
 #include "smalloc.h"
+#include "blktrace.h"
+#include "pshared.h"
+
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 static int iolog_flush(struct io_log *log);
 
@@ -35,7 +42,7 @@ void log_io_u(const struct thread_data *td, const struct io_u *io_u)
 	if (!td->o.write_iolog_file)
 		return;
 
-	fprintf(td->iolog_f, "%s %s %llu %lu\n", io_u->file->file_name,
+	fprintf(td->iolog_f, "%s %s %llu %llu\n", io_u->file->file_name,
 						io_ddir_name(io_u->ddir),
 						io_u->offset, io_u->buflen);
 }
@@ -63,8 +70,9 @@ void log_file(struct thread_data *td, struct fio_file *f,
 static void iolog_delay(struct thread_data *td, unsigned long delay)
 {
 	uint64_t usec = utime_since_now(&td->last_issue);
+	unsigned long orig_delay = delay;
 	uint64_t this_delay;
-	struct timeval tv;
+	struct timespec ts;
 
 	if (delay < td->time_offset) {
 		td->time_offset = 0;
@@ -77,7 +85,7 @@ static void iolog_delay(struct thread_data *td, unsigned long delay)
 
 	delay -= usec;
 
-	fio_gettime(&tv, NULL);
+	fio_gettime(&ts, NULL);
 	while (delay && !td->terminate) {
 		this_delay = delay;
 		if (this_delay > 500000)
@@ -87,9 +95,9 @@ static void iolog_delay(struct thread_data *td, unsigned long delay)
 		delay -= this_delay;
 	}
 
-	usec = utime_since_now(&tv);
-	if (usec > delay)
-		td->time_offset = usec - delay;
+	usec = utime_since_now(&ts);
+	if (usec > orig_delay)
+		td->time_offset = usec - orig_delay;
 	else
 		td->time_offset = 0;
 }
@@ -133,6 +141,8 @@ static int ipo_special(struct thread_data *td, struct io_piece *ipo)
 	return 1;
 }
 
+static bool read_iolog2(struct thread_data *td);
+
 int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 {
 	struct io_piece *ipo;
@@ -140,7 +150,13 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 
 	while (!flist_empty(&td->io_log_list)) {
 		int ret;
-
+		if (td->o.read_iolog_chunked) {
+			if (td->io_log_checkmark == td->io_log_current) {
+				if (!read_iolog2(td))
+					return 1;
+			}
+			td->io_log_current--;
+		}
 		ipo = flist_first_entry(&td->io_log_list, struct io_piece, list);
 		flist_del(&ipo->list);
 		remove_trim_entry(td, ipo);
@@ -160,7 +176,7 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 			io_u->buflen = ipo->len;
 			io_u->file = td->files[ipo->fileno];
 			get_file(io_u->file);
-			dprint(FD_IO, "iolog: get %llu/%lu/%s\n", io_u->offset,
+			dprint(FD_IO, "iolog: get %llu/%llu/%s\n", io_u->offset,
 						io_u->buflen, io_u->file->file_name);
 			if (ipo->delay)
 				iolog_delay(td, ipo->delay);
@@ -183,7 +199,7 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 void prune_io_piece_log(struct thread_data *td)
 {
 	struct io_piece *ipo;
-	struct rb_node *n;
+	struct fio_rb_node *n;
 
 	while ((n = rb_first(&td->io_hist_tree)) != NULL) {
 		ipo = rb_entry(n, struct io_piece, rb_node);
@@ -207,10 +223,10 @@ void prune_io_piece_log(struct thread_data *td)
  */
 void log_io_piece(struct thread_data *td, struct io_u *io_u)
 {
-	struct rb_node **p, *parent;
+	struct fio_rb_node **p, *parent;
 	struct io_piece *ipo, *__ipo;
 
-	ipo = malloc(sizeof(struct io_piece));
+	ipo = calloc(1, sizeof(struct io_piece));
 	init_ipo(ipo);
 	ipo->file = io_u->file;
 	ipo->offset = io_u->offset;
@@ -226,21 +242,11 @@ void log_io_piece(struct thread_data *td, struct io_u *io_u)
 	}
 
 	/*
-	 * We don't need to sort the entries, if:
-	 *
-	 *	Sequential writes, or
-	 *	Random writes that lay out the file as it goes along
-	 *
-	 * For both these cases, just reading back data in the order we
-	 * wrote it out is the fastest.
-	 *
-	 * One exception is if we don't have a random map AND we are doing
-	 * verifies, in that case we need to check for duplicate blocks and
-	 * drop the old one, which we rely on the rb insert/lookup for
-	 * handling.
+	 * Only sort writes if we don't have a random map in which case we need
+	 * to check for duplicate blocks and drop the old one, which we rely on
+	 * the rb insert/lookup for handling.
 	 */
-	if (((!td->o.verifysort) || !td_random(td) || !td->o.overwrite) &&
-	      (file_randommap(td, ipo->file) || td->o.verify == VERIFY_NONE)) {
+	if (file_randommap(td, ipo->file)) {
 		INIT_FLIST_HEAD(&ipo->list);
 		flist_add_tail(&ipo->list, &td->io_hist_list);
 		ipo->flags |= IP_F_ONLIST;
@@ -283,7 +289,8 @@ restart:
 			td->io_hist_len--;
 			rb_erase(parent, &td->io_hist_tree);
 			remove_trim_entry(td, __ipo);
-			free(__ipo);
+			if (!(__ipo->flags & IP_F_IN_FLIGHT))
+				free(__ipo);
 			goto restart;
 		}
 	}
@@ -323,7 +330,7 @@ void unlog_io_piece(struct thread_data *td, struct io_u *io_u)
 	td->io_hist_len--;
 }
 
-void trim_io_piece(struct thread_data *td, const struct io_u *io_u)
+void trim_io_piece(const struct io_u *io_u)
 {
 	struct io_piece *ipo = io_u->ipo;
 
@@ -342,11 +349,39 @@ void write_iolog_close(struct thread_data *td)
 	td->iolog_buf = NULL;
 }
 
+static int64_t iolog_items_to_fetch(struct thread_data *td)
+{
+	struct timespec now;
+	uint64_t elapsed;
+	uint64_t for_1s;
+	int64_t items_to_fetch;
+
+	if (!td->io_log_highmark)
+		return 10;
+
+
+	fio_gettime(&now, NULL);
+	elapsed = ntime_since(&td->io_log_highmark_time, &now);
+	if (elapsed) {
+		for_1s = (td->io_log_highmark - td->io_log_current) * 1000000000 / elapsed;
+		items_to_fetch = for_1s - td->io_log_current;
+		if (items_to_fetch < 0)
+			items_to_fetch = 0;
+	} else
+		items_to_fetch = 0;
+
+	td->io_log_highmark = td->io_log_current + items_to_fetch;
+	td->io_log_checkmark = (td->io_log_highmark + 1) / 2;
+	fio_gettime(&td->io_log_highmark_time, NULL);
+
+	return items_to_fetch;
+}
+
 /*
  * Read version 2 iolog data. It is enhanced to include per-file logging,
  * syncs, etc.
  */
-static int read_iolog2(struct thread_data *td, FILE *f)
+static bool read_iolog2(struct thread_data *td)
 {
 	unsigned long long offset;
 	unsigned int bytes;
@@ -354,8 +389,14 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 	char *rfname, *fname, *act;
 	char *str, *p;
 	enum fio_ddir rw;
+	bool realloc = false;
+	int64_t items_to_fetch = 0;
 
-	free_release_files(td);
+	if (td->o.read_iolog_chunked) {
+		items_to_fetch = iolog_items_to_fetch(td);
+		if (!items_to_fetch)
+			return true;
+	}
 
 	/*
 	 * Read in the read iolog and store it, reuse the infrastructure
@@ -366,7 +407,7 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 	act = malloc(256+16);
 
 	reads = writes = waits = 0;
-	while ((p = fgets(str, 4096, f)) != NULL) {
+	while ((p = fgets(str, 4096, td->io_log_rfile)) != NULL) {
 		struct io_piece *ipo;
 		int r;
 
@@ -406,7 +447,7 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 					dprint(FD_FILE, "iolog: ignoring"
 						" re-add of file %s\n", fname);
 				} else {
-					fileno = add_file(td, fname, 0, 1);
+					fileno = add_file(td, fname, td->subjob_number, 1);
 					file_action = FIO_LOG_ADD_FILE;
 				}
 				continue;
@@ -448,7 +489,7 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 		/*
 		 * Make note of file
 		 */
-		ipo = malloc(sizeof(*ipo));
+		ipo = calloc(1, sizeof(*ipo));
 		init_ipo(ipo);
 		ipo->ddir = rw;
 		if (rw == DDIR_WAIT) {
@@ -461,19 +502,34 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 			ipo_bytes_align(td->o.replay_align, ipo);
 
 			ipo->len = bytes;
-			if (rw != DDIR_INVAL && bytes > td->o.max_bs[rw])
+			if (rw != DDIR_INVAL && bytes > td->o.max_bs[rw]) {
+				realloc = true;
 				td->o.max_bs[rw] = bytes;
+			}
 			ipo->fileno = fileno;
 			ipo->file_action = file_action;
 			td->o.size += bytes;
 		}
 
 		queue_io_piece(td, ipo);
+
+		if (td->o.read_iolog_chunked) {
+			td->io_log_current++;
+			items_to_fetch--;
+			if (items_to_fetch == 0)
+				break;
+		}
 	}
 
 	free(str);
 	free(act);
 	free(rfname);
+
+	if (td->o.read_iolog_chunked) {
+		td->io_log_highmark = td->io_log_current;
+		td->io_log_checkmark = (td->io_log_highmark + 1) / 2;
+		fio_gettime(&td->io_log_highmark_time, NULL);
+	}
 
 	if (writes && read_only) {
 		log_err("fio: <%s> skips replay of %d writes due to"
@@ -481,8 +537,22 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 		writes = 0;
 	}
 
+	if (td->o.read_iolog_chunked) {
+		if (td->io_log_current == 0) {
+			return false;
+		}
+		td->o.td_ddir = TD_DDIR_RW;
+		if (realloc && td->orig_buffer)
+		{
+			io_u_quiesce(td);
+			free_io_mem(td);
+			init_io_u_buffers(td);
+		}
+		return true;
+	}
+
 	if (!reads && !writes && !waits)
-		return 1;
+		return false;
 	else if (reads && !writes)
 		td->o.td_ddir = TD_DDIR_READ;
 	else if (!reads && writes)
@@ -490,22 +560,70 @@ static int read_iolog2(struct thread_data *td, FILE *f)
 	else
 		td->o.td_ddir = TD_DDIR_RW;
 
-	return 0;
+	return true;
+}
+
+static bool is_socket(const char *path)
+{
+	struct stat buf;
+	int r;
+
+	r = stat(path, &buf);
+	if (r == -1)
+		return false;
+
+	return S_ISSOCK(buf.st_mode);
+}
+
+static int open_socket(const char *path)
+{
+	struct sockaddr_un addr;
+	int ret, fd;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		return fd;
+
+	addr.sun_family = AF_UNIX;
+	if (snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path) >=
+	    sizeof(addr.sun_path)) {
+		log_err("%s: path name %s is too long for a Unix socket\n",
+			__func__, path);
+	}
+
+	ret = connect(fd, (const struct sockaddr *)&addr, strlen(path) + sizeof(addr.sun_family));
+	if (!ret)
+		return fd;
+
+	close(fd);
+	return -1;
 }
 
 /*
  * open iolog, check version, and call appropriate parser
  */
-static int init_iolog_read(struct thread_data *td)
+static bool init_iolog_read(struct thread_data *td)
 {
-	char buffer[256], *p;
-	FILE *f;
-	int ret;
+	char buffer[256], *p, *fname;
+	FILE *f = NULL;
 
-	f = fopen(td->o.read_iolog_file, "r");
+	fname = get_name_by_idx(td->o.read_iolog_file, td->subjob_number);
+	dprint(FD_IO, "iolog: name=%s\n", fname);
+
+	if (is_socket(fname)) {
+		int fd;
+
+		fd = open_socket(fname);
+		if (fd >= 0)
+			f = fdopen(fd, "r");
+	} else
+		f = fopen(fname, "r");
+
+	free(fname);
+
 	if (!f) {
 		perror("fopen read iolog");
-		return 1;
+		return false;
 	}
 
 	p = fgets(buffer, sizeof(buffer), f);
@@ -513,28 +631,28 @@ static int init_iolog_read(struct thread_data *td)
 		td_verror(td, errno, "iolog read");
 		log_err("fio: unable to read iolog\n");
 		fclose(f);
-		return 1;
+		return false;
 	}
 
 	/*
 	 * version 2 of the iolog stores a specific string as the
 	 * first line, check for that
 	 */
-	if (!strncmp(iolog_ver2, buffer, strlen(iolog_ver2)))
-		ret = read_iolog2(td, f);
-	else {
-		log_err("fio: iolog version 1 is no longer supported\n");
-		ret = 1;
+	if (!strncmp(iolog_ver2, buffer, strlen(iolog_ver2))) {
+		free_release_files(td);
+		td->io_log_rfile = f;
+		return read_iolog2(td);
 	}
 
+	log_err("fio: iolog version 1 is no longer supported\n");
 	fclose(f);
-	return ret;
+	return false;
 }
 
 /*
  * Set up a log for storing io patterns.
  */
-static int init_iolog_write(struct thread_data *td)
+static bool init_iolog_write(struct thread_data *td)
 {
 	struct fio_file *ff;
 	FILE *f;
@@ -543,7 +661,7 @@ static int init_iolog_write(struct thread_data *td)
 	f = fopen(td->o.write_iolog_file, "a");
 	if (!f) {
 		perror("fopen write iolog");
-		return 1;
+		return false;
 	}
 
 	/*
@@ -558,7 +676,7 @@ static int init_iolog_write(struct thread_data *td)
 	 */
 	if (fprintf(f, "%s\n", iolog_ver2) < 0) {
 		perror("iolog init\n");
-		return 1;
+		return false;
 	}
 
 	/*
@@ -567,12 +685,12 @@ static int init_iolog_write(struct thread_data *td)
 	for_each_file(td, ff, i)
 		log_file(td, ff, FIO_LOG_ADD_FILE);
 
-	return 0;
+	return true;
 }
 
-int init_iolog(struct thread_data *td)
+bool init_iolog(struct thread_data *td)
 {
-	int ret = 0;
+	bool ret;
 
 	if (td->o.read_iolog_file) {
 		int need_swap;
@@ -587,8 +705,10 @@ int init_iolog(struct thread_data *td)
 			ret = init_iolog_read(td);
 	} else if (td->o.write_iolog_file)
 		ret = init_iolog_write(td);
+	else
+		ret = true;
 
-	if (ret)
+	if (!ret)
 		td_verror(td, EINVAL, "failed initializing iolog");
 
 	return ret;
@@ -625,12 +745,12 @@ void setup_log(struct io_log **log, struct log_params *p,
 	}
 
 	if (l->td && l->td->o.io_submit_mode != IO_MODE_OFFLOAD) {
-		struct io_logs *p;
+		struct io_logs *__p;
 
-		p = calloc(1, sizeof(*l->pending));
-		p->max_samples = DEF_LOG_ENTRIES;
-		p->log = calloc(p->max_samples, log_entry_sz(l));
-		l->pending = p;
+		__p = calloc(1, sizeof(*l->pending));
+		__p->max_samples = DEF_LOG_ENTRIES;
+		__p->log = calloc(__p->max_samples, log_entry_sz(l));
+		l->pending = __p;
 	}
 
 	if (l->log_offset)
@@ -642,6 +762,7 @@ void setup_log(struct io_log **log, struct log_params *p,
 		l->log_gz = 0;
 	else if (l->log_gz || l->log_gz_store) {
 		mutex_init_pshared(&l->chunk_lock);
+		mutex_init_pshared(&l->deferred_free_lock);
 		p->td->flags |= TD_F_COMPRESS_LOG;
 	}
 
@@ -696,10 +817,10 @@ void free_log(struct io_log *log)
 	sfree(log);
 }
 
-unsigned long hist_sum(int j, int stride, unsigned int *io_u_plat,
-		unsigned int *io_u_plat_last)
+uint64_t hist_sum(int j, int stride, uint64_t *io_u_plat,
+		uint64_t *io_u_plat_last)
 {
-	unsigned long sum;
+	uint64_t sum;
 	int k;
 
 	if (io_u_plat_last) {
@@ -720,8 +841,8 @@ static void flush_hist_samples(FILE *f, int hist_coarseness, void *samples,
 	int log_offset;
 	uint64_t i, j, nr_samples;
 	struct io_u_plat_entry *entry, *entry_before;
-	unsigned int *io_u_plat;
-	unsigned int *io_u_plat_before;
+	uint64_t *io_u_plat;
+	uint64_t *io_u_plat_before;
 
 	int stride = 1 << hist_coarseness;
 	
@@ -742,13 +863,13 @@ static void flush_hist_samples(FILE *f, int hist_coarseness, void *samples,
 		entry_before = flist_first_entry(&entry->list, struct io_u_plat_entry, list);
 		io_u_plat_before = entry_before->io_u_plat;
 
-		fprintf(f, "%lu, %u, %u, ", (unsigned long) s->time,
-						io_sample_ddir(s), s->bs);
+		fprintf(f, "%lu, %u, %llu, ", (unsigned long) s->time,
+						io_sample_ddir(s), (unsigned long long) s->bs);
 		for (j = 0; j < FIO_IO_U_PLAT_NR - stride; j += stride) {
-			fprintf(f, "%lu, ", hist_sum(j, stride, io_u_plat,
-						io_u_plat_before));
+			fprintf(f, "%llu, ", (unsigned long long)
+			        hist_sum(j, stride, io_u_plat, io_u_plat_before));
 		}
-		fprintf(f, "%lu\n", (unsigned long)
+		fprintf(f, "%llu\n", (unsigned long long)
 		        hist_sum(FIO_IO_U_PLAT_NR - stride, stride, io_u_plat,
 					io_u_plat_before));
 
@@ -775,18 +896,18 @@ void flush_samples(FILE *f, void *samples, uint64_t sample_size)
 		s = __get_sample(samples, log_offset, i);
 
 		if (!log_offset) {
-			fprintf(f, "%lu, %" PRId64 ", %u, %u\n",
+			fprintf(f, "%lu, %" PRId64 ", %u, %llu, %u\n",
 					(unsigned long) s->time,
 					s->data.val,
-					io_sample_ddir(s), s->bs);
+					io_sample_ddir(s), (unsigned long long) s->bs, s->priority_bit);
 		} else {
 			struct io_sample_offset *so = (void *) s;
 
-			fprintf(f, "%lu, %" PRId64 ", %u, %u, %llu\n",
+			fprintf(f, "%lu, %" PRId64 ", %u, %llu, %llu, %u\n",
 					(unsigned long) s->time,
 					s->data.val,
-					io_sample_ddir(s), s->bs,
-					(unsigned long long) so->offset);
+					io_sample_ddir(s), (unsigned long long) s->bs,
+					(unsigned long long) so->offset, s->priority_bit);
 		}
 	}
 }
@@ -981,7 +1102,7 @@ int iolog_file_inflate(const char *file)
 	struct iolog_compress ic;
 	z_stream stream;
 	struct stat sb;
-	ssize_t ret;
+	size_t ret;
 	size_t total;
 	void *buf;
 	FILE *f;
@@ -1003,12 +1124,12 @@ int iolog_file_inflate(const char *file)
 	ic.seq = 1;
 
 	ret = fread(ic.buf, ic.len, 1, f);
-	if (ret < 0) {
+	if (ret == 0 && ferror(f)) {
 		perror("fread");
 		fclose(f);
 		free(buf);
 		return 1;
-	} else if (ret != 1) {
+	} else if (ferror(f) || (!feof(f) && ret != 1)) {
 		log_err("fio: short read on reading log\n");
 		fclose(f);
 		free(buf);
@@ -1143,6 +1264,38 @@ size_t log_chunk_sizes(struct io_log *log)
 
 #ifdef CONFIG_ZLIB
 
+static void iolog_put_deferred(struct io_log *log, void *ptr)
+{
+	if (!ptr)
+		return;
+
+	pthread_mutex_lock(&log->deferred_free_lock);
+	if (log->deferred < IOLOG_MAX_DEFER) {
+		log->deferred_items[log->deferred] = ptr;
+		log->deferred++;
+	} else if (!fio_did_warn(FIO_WARN_IOLOG_DROP))
+		log_err("fio: had to drop log entry free\n");
+	pthread_mutex_unlock(&log->deferred_free_lock);
+}
+
+static void iolog_free_deferred(struct io_log *log)
+{
+	int i;
+
+	if (!log->deferred)
+		return;
+
+	pthread_mutex_lock(&log->deferred_free_lock);
+
+	for (i = 0; i < log->deferred; i++) {
+		free(log->deferred_items[i]);
+		log->deferred_items[i] = NULL;
+	}
+
+	log->deferred = 0;
+	pthread_mutex_unlock(&log->deferred_free_lock);
+}
+
 static int gz_work(struct iolog_flush_data *data)
 {
 	struct iolog_compress *c = NULL;
@@ -1235,7 +1388,7 @@ static int gz_work(struct iolog_flush_data *data)
 	if (ret != Z_OK)
 		log_err("fio: deflateEnd %d\n", ret);
 
-	free(data->samples);
+	iolog_put_deferred(data->log, data->samples);
 
 	if (!flist_empty(&list)) {
 		pthread_mutex_lock(&data->log->chunk_lock);
@@ -1246,7 +1399,7 @@ static int gz_work(struct iolog_flush_data *data)
 	ret = 0;
 done:
 	if (data->free)
-		free(data);
+		sfree(data);
 	return ret;
 err:
 	while (!flist_empty(&list)) {
@@ -1347,7 +1500,7 @@ int iolog_cur_flush(struct io_log *log, struct io_logs *cur_log)
 {
 	struct iolog_flush_data *data;
 
-	data = malloc(sizeof(*data));
+	data = smalloc(sizeof(*data));
 	if (!data)
 		return 1;
 
@@ -1361,6 +1514,9 @@ int iolog_cur_flush(struct io_log *log, struct io_logs *cur_log)
 	cur_log->log = NULL;
 
 	workqueue_enqueue(&log->td->log_compress_wq, &data->work);
+
+	iolog_free_deferred(log);
+
 	return 0;
 }
 #else

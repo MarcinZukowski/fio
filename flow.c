@@ -1,5 +1,5 @@
 #include "fio.h"
-#include "mutex.h"
+#include "fio_sem.h"
 #include "smalloc.h"
 #include "flist.h"
 
@@ -11,18 +11,22 @@ struct fio_flow {
 };
 
 static struct flist_head *flow_list;
-static struct fio_mutex *flow_lock;
+static struct fio_sem *flow_lock;
 
 int flow_threshold_exceeded(struct thread_data *td)
 {
 	struct fio_flow *flow = td->flow;
-	int sign;
+	long long flow_counter;
 
 	if (!flow)
 		return 0;
 
-	sign = td->o.flow > 0 ? 1 : -1;
-	if (sign * flow->flow_counter > td->o.flow_watermark) {
+	if (td->o.flow > 0)
+		flow_counter = flow->flow_counter;
+	else
+		flow_counter = -flow->flow_counter;
+
+	if (flow_counter > td->o.flow_watermark) {
 		if (td->o.flow_sleep) {
 			io_u_quiesce(td);
 			usleep(td->o.flow_sleep);
@@ -45,7 +49,7 @@ static struct fio_flow *flow_get(unsigned int id)
 	if (!flow_lock)
 		return NULL;
 
-	fio_mutex_down(flow_lock);
+	fio_sem_down(flow_lock);
 
 	flist_for_each(n, flow_list) {
 		flow = flist_entry(n, struct fio_flow, list);
@@ -58,7 +62,7 @@ static struct fio_flow *flow_get(unsigned int id)
 	if (!flow) {
 		flow = smalloc(sizeof(*flow));
 		if (!flow) {
-			fio_mutex_up(flow_lock);
+			fio_sem_up(flow_lock);
 			return NULL;
 		}
 		flow->refs = 0;
@@ -70,7 +74,7 @@ static struct fio_flow *flow_get(unsigned int id)
 	}
 
 	flow->refs++;
-	fio_mutex_up(flow_lock);
+	fio_sem_up(flow_lock);
 	return flow;
 }
 
@@ -79,14 +83,14 @@ static void flow_put(struct fio_flow *flow)
 	if (!flow_lock)
 		return;
 
-	fio_mutex_down(flow_lock);
+	fio_sem_down(flow_lock);
 
 	if (!--flow->refs) {
 		flist_del(&flow->list);
 		sfree(flow);
 	}
 
-	fio_mutex_up(flow_lock);
+	fio_sem_up(flow_lock);
 }
 
 void flow_init_job(struct thread_data *td)
@@ -111,7 +115,7 @@ void flow_init(void)
 		return;
 	}
 
-	flow_lock = fio_mutex_init(FIO_MUTEX_UNLOCKED);
+	flow_lock = fio_sem_init(FIO_SEM_UNLOCKED);
 	if (!flow_lock) {
 		log_err("fio: failed to allocate flow lock\n");
 		sfree(flow_list);
@@ -124,7 +128,7 @@ void flow_init(void)
 void flow_exit(void)
 {
 	if (flow_lock)
-		fio_mutex_remove(flow_lock);
+		fio_sem_remove(flow_lock);
 	if (flow_list)
 		sfree(flow_list);
 }

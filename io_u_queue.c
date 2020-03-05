@@ -1,23 +1,32 @@
 #include <stdlib.h>
+#include <string.h>
 #include "io_u_queue.h"
+#include "smalloc.h"
 
-int io_u_qinit(struct io_u_queue *q, unsigned int nr)
+bool io_u_qinit(struct io_u_queue *q, unsigned int nr, bool shared)
 {
-	q->io_us = calloc(nr, sizeof(struct io_u *));
+	if (shared)
+		q->io_us = smalloc(nr * sizeof(struct io_u *));
+	else
+		q->io_us = calloc(nr, sizeof(struct io_u *));
+
 	if (!q->io_us)
-		return 1;
+		return false;
 
 	q->nr = 0;
 	q->max = nr;
-	return 0;
+	return true;
 }
 
-void io_u_qexit(struct io_u_queue *q)
+void io_u_qexit(struct io_u_queue *q, bool shared)
 {
-	free(q->io_us);
+	if (shared)
+		sfree(q->io_us);
+	else
+		free(q->io_us);
 }
 
-int io_u_rinit(struct io_u_ring *ring, unsigned int nr)
+bool io_u_rinit(struct io_u_ring *ring, unsigned int nr)
 {
 	ring->max = nr + 1;
 	if (ring->max & (ring->max - 1)) {
@@ -32,10 +41,10 @@ int io_u_rinit(struct io_u_ring *ring, unsigned int nr)
 
 	ring->ring = calloc(ring->max, sizeof(struct io_u *));
 	if (!ring->ring)
-		return 1;
+		return false;
 
 	ring->head = ring->tail = 0;
-	return 0;
+	return true;
 }
 
 void io_u_rexit(struct io_u_ring *ring)

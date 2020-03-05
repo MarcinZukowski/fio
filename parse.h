@@ -10,17 +10,20 @@
 enum fio_opt_type {
 	FIO_OPT_INVALID = 0,
 	FIO_OPT_STR,
+	FIO_OPT_STR_ULL,
 	FIO_OPT_STR_MULTI,
 	FIO_OPT_STR_VAL,
 	FIO_OPT_STR_VAL_TIME,
 	FIO_OPT_STR_STORE,
 	FIO_OPT_RANGE,
 	FIO_OPT_INT,
+	FIO_OPT_ULL,
 	FIO_OPT_BOOL,
 	FIO_OPT_FLOAT_LIST,
 	FIO_OPT_STR_SET,
 	FIO_OPT_DEPRECATED,
-	FIO_OPT_UNSUPPORTED,
+	FIO_OPT_SOFT_DEPRECATED,
+	FIO_OPT_UNSUPPORTED,	/* keep this last */
 };
 
 /*
@@ -28,14 +31,14 @@ enum fio_opt_type {
  */
 struct value_pair {
 	const char *ival;		/* string option */
-	unsigned int oval;		/* output value */
+	unsigned long long oval;/* output value */
 	const char *help;		/* help text for sub option */
 	int orval;			/* OR value */
 	void *cb;			/* sub-option callback */
 };
 
-#define OPT_LEN_MAX 	4096
-#define PARSE_MAX_VP	24
+#define OPT_LEN_MAX 	8192
+#define PARSE_MAX_VP	32
 
 /*
  * Option define
@@ -51,7 +54,7 @@ struct fio_option {
 	unsigned int off4;
 	unsigned int off5;
 	unsigned int off6;
-	unsigned int maxval;		/* max and min value */
+	unsigned long long maxval;		/* max and min value */
 	int minval;
 	double maxfp;			/* max and min floating value */
 	double minfp;
@@ -68,7 +71,7 @@ struct fio_option {
 	int hide_on_set;		/* hide on set, not on unset */
 	const char *inverse;		/* if set, apply opposite action to this option */
 	struct fio_option *inv_opt;	/* cached lookup */
-	int (*verify)(struct fio_option *, void *);
+	int (*verify)(const struct fio_option *, void *);
 	const char *prof_name;		/* only valid for specific profile */
 	void *prof_opts;
 	uint64_t category;		/* what type of option */
@@ -78,16 +81,21 @@ struct fio_option {
 	int is_time;			/* time based value */
 	int no_warn_def;
 	int pow2;			/* must be a power-of-2 */
+	int no_free;
 };
 
-extern int parse_option(char *, const char *, struct fio_option *, struct fio_option **, void *, struct flist_head *);
-extern void sort_options(char **, struct fio_option *, int);
-extern int parse_cmd_option(const char *t, const char *l, struct fio_option *, void *, struct flist_head *);
-extern int show_cmd_help(struct fio_option *, const char *);
-extern void fill_default_options(void *, struct fio_option *);
+extern int parse_option(char *, const char *, const struct fio_option *,
+			const struct fio_option **, void *,
+			struct flist_head *);
+extern void sort_options(char **, const struct fio_option *, int);
+extern int parse_cmd_option(const char *t, const char *l,
+			    const struct fio_option *, void *,
+			    struct flist_head *);
+extern int show_cmd_help(const struct fio_option *, const char *);
+extern void fill_default_options(void *, const struct fio_option *);
 extern void options_init(struct fio_option *);
-extern void options_mem_dupe(struct fio_option *, void *);
-extern void options_free(struct fio_option *, void *);
+extern void options_mem_dupe(const struct fio_option *, void *);
+extern void options_free(const struct fio_option *, void *);
 
 extern void strip_blank_front(char **);
 extern void strip_blank_end(char *);
@@ -107,7 +115,8 @@ typedef int (fio_opt_str_val_fn)(void *, long long *);
 typedef int (fio_opt_int_fn)(void *, int *);
 
 struct thread_options;
-static inline void *td_var(void *to, struct fio_option *o, unsigned int offset)
+static inline void *td_var(void *to, const struct fio_option *o,
+			   unsigned int offset)
 {
 	void *ret;
 
@@ -116,7 +125,7 @@ static inline void *td_var(void *to, struct fio_option *o, unsigned int offset)
 	else
 		ret = to;
 
-	return (char *) ret + offset;
+	return ret + offset;
 }
 
 static inline int parse_is_percent(unsigned long long val)

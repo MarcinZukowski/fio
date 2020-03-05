@@ -2,14 +2,18 @@
  * Status and ETA code
  */
 #include <unistd.h>
-#include <fcntl.h>
 #include <string.h>
+#ifdef CONFIG_VALGRIND_DEV
+#include <valgrind/drd.h>
+#else
+#define DRD_IGNORE_VAR(x) do { } while (0)
+#endif
 
 #include "fio.h"
 #include "lib/pow2.h"
 
 static char __run_str[REAL_MAX_JOBS + 1];
-static char run_str[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS)];
+static char run_str[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS) + 1];
 
 static void update_condensed_str(char *rstr, char *run_str_condensed)
 {
@@ -145,7 +149,7 @@ void eta_to_str(char *str, unsigned long eta_sec)
 		str += sprintf(str, "%02uh:", h);
 
 	str += sprintf(str, "%02um:", m);
-	str += sprintf(str, "%02us", s);
+	sprintf(str, "%02us", s);
 }
 
 /*
@@ -173,12 +177,27 @@ static unsigned long thread_eta(struct thread_data *td)
 		bytes_total = td->fill_device_size;
 	}
 
-	if (td->o.zone_size && td->o.zone_skip && bytes_total) {
+	/*
+	 * If io_size is set, bytes_total is an exact value that does not need
+	 * adjustment.
+	 */
+	if (td->o.zone_size && td->o.zone_skip && bytes_total &&
+	    !fio_option_is_set(&td->o, io_size)) {
 		unsigned int nr_zones;
 		uint64_t zone_bytes;
 
-		zone_bytes = bytes_total + td->o.zone_size + td->o.zone_skip;
-		nr_zones = (zone_bytes - 1) / (td->o.zone_size + td->o.zone_skip);
+		/*
+		 * Calculate the upper bound of the number of zones that will
+		 * be processed, including skipped bytes between zones. If this
+		 * is larger than total_io_size (e.g. when --io_size or --size
+		 * specify a small value), use the lower bound to avoid
+		 * adjustments to a negative value that would result in a very
+		 * large bytes_total and an incorrect eta.
+		 */
+		zone_bytes = td->o.zone_size + td->o.zone_skip;
+		nr_zones = (bytes_total + zone_bytes - 1) / zone_bytes;
+		if (bytes_total < nr_zones * td->o.zone_skip)
+			nr_zones = bytes_total / zone_bytes;
 		bytes_total -= nr_zones * td->o.zone_skip;
 	}
 
@@ -348,6 +367,14 @@ static void calc_iops(int unified_rw_rep, unsigned long mtime,
 }
 
 /*
+ * Allow a little slack - if we're within 95% of the time, allow ETA.
+ */
+bool eta_time_within_slack(unsigned int time)
+{
+	return time > ((eta_interval_msec * 95) / 100);
+}
+
+/*
  * Print status of the jobs we know about. This includes rate estimates,
  * ETA, thread state, etc.
  */
@@ -358,12 +385,12 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 	uint64_t rate_time, disp_time, bw_avg_time, *eta_secs;
 	unsigned long long io_bytes[DDIR_RWDIR_CNT];
 	unsigned long long io_iops[DDIR_RWDIR_CNT];
-	struct timeval now;
+	struct timespec now;
 
 	static unsigned long long rate_io_bytes[DDIR_RWDIR_CNT];
 	static unsigned long long disp_io_bytes[DDIR_RWDIR_CNT];
 	static unsigned long long disp_io_iops[DDIR_RWDIR_CNT];
-	static struct timeval rate_prev_time, disp_prev_time;
+	static struct timespec rate_prev_time, disp_prev_time;
 
 	if (!force) {
 		if (!(output_format & FIO_OUTPUT_NORMAL) &&
@@ -482,17 +509,14 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 		calc_rate(unified_rw_rep, rate_time, io_bytes, rate_io_bytes,
 				je->rate);
 		memcpy(&rate_prev_time, &now, sizeof(now));
-		add_agg_sample(sample_val(je->rate[DDIR_READ]), DDIR_READ, 0);
-		add_agg_sample(sample_val(je->rate[DDIR_WRITE]), DDIR_WRITE, 0);
-		add_agg_sample(sample_val(je->rate[DDIR_TRIM]), DDIR_TRIM, 0);
+		add_agg_sample(sample_val(je->rate[DDIR_READ]), DDIR_READ, 0, 0);
+		add_agg_sample(sample_val(je->rate[DDIR_WRITE]), DDIR_WRITE, 0, 0);
+		add_agg_sample(sample_val(je->rate[DDIR_TRIM]), DDIR_TRIM, 0, 0);
 	}
 
 	disp_time = mtime_since(&disp_prev_time, &now);
 
-	/*
-	 * Allow a little slack, the target is to print it every 1000 msecs
-	 */
-	if (!force && disp_time < 900)
+	if (!force && !eta_time_within_slack(disp_time))
 		return false;
 
 	calc_rate(unified_rw_rep, disp_time, io_bytes, disp_io_bytes, je->rate);
@@ -509,13 +533,70 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 	return true;
 }
 
+static int gen_eta_str(struct jobs_eta *je, char *p, size_t left,
+		       char **rate_str, char **iops_str)
+{
+	bool has_r = je->rate[DDIR_READ] || je->iops[DDIR_READ];
+	bool has_w = je->rate[DDIR_WRITE] || je->iops[DDIR_WRITE];
+	bool has_t = je->rate[DDIR_TRIM] || je->iops[DDIR_TRIM];
+	int l = 0;
+
+	if (!has_r && !has_w && !has_t)
+		return 0;
+
+	if (has_r) {
+		l += snprintf(p + l, left - l, "[r=%s", rate_str[DDIR_READ]);
+		if (!has_w)
+			l += snprintf(p + l, left - l, "]");
+	}
+	if (has_w) {
+		if (has_r)
+			l += snprintf(p + l, left - l, ",");
+		else
+			l += snprintf(p + l, left - l, "[");
+		l += snprintf(p + l, left - l, "w=%s", rate_str[DDIR_WRITE]);
+		if (!has_t)
+			l += snprintf(p + l, left - l, "]");
+	}
+	if (has_t) {
+		if (has_r || has_w)
+			l += snprintf(p + l, left - l, ",");
+		else if (!has_r && !has_w)
+			l += snprintf(p + l, left - l, "[");
+		l += snprintf(p + l, left - l, "t=%s]", rate_str[DDIR_TRIM]);
+	}
+	if (has_r) {
+		l += snprintf(p + l, left - l, "[r=%s", iops_str[DDIR_READ]);
+		if (!has_w)
+			l += snprintf(p + l, left - l, " IOPS]");
+	}
+	if (has_w) {
+		if (has_r)
+			l += snprintf(p + l, left - l, ",");
+		else
+			l += snprintf(p + l, left - l, "[");
+		l += snprintf(p + l, left - l, "w=%s", iops_str[DDIR_WRITE]);
+		if (!has_t)
+			l += snprintf(p + l, left - l, " IOPS]");
+	}
+	if (has_t) {
+		if (has_r || has_w)
+			l += snprintf(p + l, left - l, ",");
+		else if (!has_r && !has_w)
+			l += snprintf(p + l, left - l, "[");
+		l += snprintf(p + l, left - l, "t=%s IOPS]", iops_str[DDIR_TRIM]);
+	}
+
+	return l;
+}
+
 void display_thread_status(struct jobs_eta *je)
 {
-	static struct timeval disp_eta_new_line;
+	static struct timespec disp_eta_new_line;
 	static int eta_new_line_init, eta_new_line_pending;
 	static int linelen_last;
 	static int eta_good;
-	char output[REAL_MAX_JOBS + 512], *p = output;
+	char output[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS) + 512], *p = output;
 	char eta_str[128];
 	double perc = 0.0;
 
@@ -526,6 +607,7 @@ void display_thread_status(struct jobs_eta *je)
 
 	if (eta_new_line_pending) {
 		eta_new_line_pending = 0;
+		linelen_last = 0;
 		p += sprintf(p, "\n");
 	}
 
@@ -537,9 +619,9 @@ void display_thread_status(struct jobs_eta *je)
 		char *tr, *mr;
 
 		mr = num2str(je->m_rate[0] + je->m_rate[1] + je->m_rate[2],
-				4, 0, je->is_pow2, N2S_BYTEPERSEC);
+				je->sig_figs, 0, je->is_pow2, N2S_BYTEPERSEC);
 		tr = num2str(je->t_rate[0] + je->t_rate[1] + je->t_rate[2],
-				4, 0, je->is_pow2, N2S_BYTEPERSEC);
+				je->sig_figs, 0, je->is_pow2, N2S_BYTEPERSEC);
 
 		p += sprintf(p, ", %s-%s", mr, tr);
 		free(tr);
@@ -559,6 +641,7 @@ void display_thread_status(struct jobs_eta *je)
 		size_t left;
 		int l;
 		int ddir;
+		int linelen;
 
 		if ((!je->eta_sec && !eta_good) || je->nr_ramp == je->nr_running ||
 		    je->eta_sec == -1)
@@ -581,32 +664,25 @@ void display_thread_status(struct jobs_eta *je)
 		}
 
 		left = sizeof(output) - (p - output) - 1;
+		l = snprintf(p, left, ": [%s][%s]", je->run_str, perc_str);
+		l += gen_eta_str(je, p + l, left - l, rate_str, iops_str);
+		l += snprintf(p + l, left - l, "[eta %s]", eta_str);
 
-		if (je->rate[DDIR_TRIM] || je->iops[DDIR_TRIM])
-			l = snprintf(p, left,
-				": [%s][%s][r=%s,w=%s,t=%s][r=%s,w=%s,t=%s IOPS][eta %s]",
-				je->run_str, perc_str, rate_str[DDIR_READ],
-				rate_str[DDIR_WRITE], rate_str[DDIR_TRIM],
-				iops_str[DDIR_READ], iops_str[DDIR_WRITE],
-				iops_str[DDIR_TRIM], eta_str);
-		else
-			l = snprintf(p, left,
-				": [%s][%s][r=%s,w=%s][r=%s,w=%s IOPS][eta %s]",
-				je->run_str, perc_str,
-				rate_str[DDIR_READ], rate_str[DDIR_WRITE],
-				iops_str[DDIR_READ], iops_str[DDIR_WRITE],
-				eta_str);
+		/* If truncation occurred adjust l so p is on the null */
+		if (l >= left)
+			l = left - 1;
 		p += l;
-		if (l >= 0 && l < linelen_last)
-			p += sprintf(p, "%*s", linelen_last - l, "");
-		linelen_last = l;
+		linelen = p - output;
+		if (l >= 0 && linelen < linelen_last)
+			p += sprintf(p, "%*s", linelen_last - linelen, "");
+		linelen_last = linelen;
 
 		for (ddir = 0; ddir < DDIR_RWDIR_CNT; ddir++) {
 			free(rate_str[ddir]);
 			free(iops_str[ddir]);
 		}
 	}
-	p += sprintf(p, "\r");
+	sprintf(p, "\r");
 
 	printf("%s", output);
 
@@ -657,6 +733,11 @@ void print_thread_status(void)
 
 void print_status_init(int thr_number)
 {
+	struct jobs_eta_packed jep;
+
+	compiletime_assert(sizeof(struct jobs_eta) == sizeof(jep), "jobs_eta");
+
+	DRD_IGNORE_VAR(__run_str);
 	__run_str[thr_number] = 'P';
 	update_condensed_str(__run_str, run_str);
 }

@@ -4,24 +4,33 @@
  * IO engine using the Linux native aio interface.
  *
  */
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
-#include <assert.h>
 #include <libaio.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "../fio.h"
 #include "../lib/pow2.h"
 #include "../optgroup.h"
+#include "../lib/memalign.h"
+
+/* Should be defined in newest aio_abi.h */
+#ifndef IOCB_FLAG_IOPRIO
+#define IOCB_FLAG_IOPRIO    (1 << 1)
+#endif
 
 static int fio_libaio_commit(struct thread_data *td);
+static int fio_libaio_init(struct thread_data *td);
 
 struct libaio_data {
 	io_context_t aio_ctx;
 	struct io_event *aio_events;
 	struct iocb **iocbs;
 	struct io_u **io_us;
+
+	struct io_u **io_u_index;
 
 	/*
 	 * Basic ring buffer. 'head' is incremented in _queue(), and
@@ -41,6 +50,7 @@ struct libaio_data {
 struct libaio_options {
 	void *pad;
 	unsigned int userspace_reap;
+	unsigned int cmdprio_percentage;
 };
 
 static struct fio_option options[] = {
@@ -53,6 +63,26 @@ static struct fio_option options[] = {
 		.category = FIO_OPT_C_ENGINE,
 		.group	= FIO_OPT_G_LIBAIO,
 	},
+#ifdef FIO_HAVE_IOPRIO_CLASS
+	{
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct libaio_options, cmdprio_percentage),
+		.minval	= 1,
+		.maxval	= 100,
+		.help	= "Send high priority I/O this percentage of the time",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_LIBAIO,
+	},
+#else
+	{
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
+		.type	= FIO_OPT_UNSUPPORTED,
+		.help	= "Your platform does not support I/O priority classes",
+	},
+#endif
 	{
 		.name	= NULL,
 	},
@@ -70,15 +100,27 @@ static inline void ring_inc(struct libaio_data *ld, unsigned int *val,
 static int fio_libaio_prep(struct thread_data fio_unused *td, struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
+	struct iocb *iocb = &io_u->iocb;
 
-	if (io_u->ddir == DDIR_READ)
-		io_prep_pread(&io_u->iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-	else if (io_u->ddir == DDIR_WRITE)
-		io_prep_pwrite(&io_u->iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-	else if (ddir_sync(io_u->ddir))
-		io_prep_fsync(&io_u->iocb, f->fd);
+	if (io_u->ddir == DDIR_READ) {
+		io_prep_pread(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
+	} else if (io_u->ddir == DDIR_WRITE) {
+		io_prep_pwrite(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
+	} else if (ddir_sync(io_u->ddir))
+		io_prep_fsync(iocb, f->fd);
 
 	return 0;
+}
+
+static void fio_libaio_prio_prep(struct thread_data *td, struct io_u *io_u)
+{
+	struct libaio_options *o = td->eo;
+	if (rand_between(&td->prio_state, 0, 99) < o->cmdprio_percentage) {
+		io_u->iocb.aio_reqprio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT;
+		io_u->iocb.u.c.flags |= IOCB_FLAG_IOPRIO;
+		io_u->flags |= IO_U_F_PRIORITY;
+	}
+	return;
 }
 
 static struct io_u *fio_libaio_event(struct thread_data *td, int event)
@@ -171,7 +213,8 @@ static int fio_libaio_getevents(struct thread_data *td, unsigned int min,
 			events += r;
 		else if ((min && r == 0) || r == -EAGAIN) {
 			fio_libaio_commit(td);
-			usleep(100);
+			if (actual_min)
+				usleep(10);
 		} else if (r != -EINTR)
 			break;
 	} while (events < min);
@@ -179,9 +222,11 @@ static int fio_libaio_getevents(struct thread_data *td, unsigned int min,
 	return r < 0 ? r : events;
 }
 
-static int fio_libaio_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_libaio_queue(struct thread_data *td,
+					  struct io_u *io_u)
 {
 	struct libaio_data *ld = td->io_ops_data;
+	struct libaio_options *o = td->eo;
 
 	fio_ro_check(td, io_u);
 
@@ -207,8 +252,13 @@ static int fio_libaio_queue(struct thread_data *td, struct io_u *io_u)
 			return FIO_Q_BUSY;
 
 		do_io_u_trim(td, io_u);
+		io_u_mark_submit(td, 1);
+		io_u_mark_complete(td, 1);
 		return FIO_Q_COMPLETED;
 	}
+
+	if (o->cmdprio_percentage)
+		fio_libaio_prio_prep(td, io_u);
 
 	ld->iocbs[ld->head] = &io_u->iocb;
 	ld->io_us[ld->head] = io_u;
@@ -220,7 +270,7 @@ static int fio_libaio_queue(struct thread_data *td, struct io_u *io_u)
 static void fio_libaio_queued(struct thread_data *td, struct io_u **io_us,
 			      unsigned int nr)
 {
-	struct timeval now;
+	struct timespec now;
 	unsigned int i;
 
 	if (!fio_fill_issue_time(td))
@@ -241,7 +291,7 @@ static int fio_libaio_commit(struct thread_data *td)
 	struct libaio_data *ld = td->io_ops_data;
 	struct iocb **iocbs;
 	struct io_u **io_us;
-	struct timeval tv;
+	struct timespec ts;
 	int ret, wait_start = 0;
 
 	if (!ld->queued)
@@ -282,9 +332,9 @@ static int fio_libaio_commit(struct thread_data *td)
 				break;
 			}
 			if (!wait_start) {
-				fio_gettime(&tv, NULL);
+				fio_gettime(&ts, NULL);
 				wait_start = 1;
-			} else if (mtime_since_now(&tv) > 30000) {
+			} else if (mtime_since_now(&ts) > 30000) {
 				log_err("fio: aio appears to be stalled, giving up\n");
 				break;
 			}
@@ -333,29 +383,27 @@ static void fio_libaio_cleanup(struct thread_data *td)
 	}
 }
 
-static int fio_libaio_init(struct thread_data *td)
+static int fio_libaio_post_init(struct thread_data *td)
 {
-	struct libaio_options *o = td->eo;
-	struct libaio_data *ld;
-	int err = 0;
+	struct libaio_data *ld = td->io_ops_data;
+	int err;
 
-	ld = calloc(1, sizeof(*ld));
-
-	/*
-	 * First try passing in 0 for queue depth, since we don't
-	 * care about the user ring. If that fails, the kernel is too old
-	 * and we need the right depth.
-	 */
-	if (!o->userspace_reap)
-		err = io_queue_init(INT_MAX, &ld->aio_ctx);
-	if (o->userspace_reap || err == -EINVAL)
-		err = io_queue_init(td->o.iodepth, &ld->aio_ctx);
+	err = io_queue_init(td->o.iodepth, &ld->aio_ctx);
 	if (err) {
 		td_verror(td, -err, "io_queue_init");
-		log_err("fio: check /proc/sys/fs/aio-max-nr\n");
-		free(ld);
 		return 1;
 	}
+
+	return 0;
+}
+
+static int fio_libaio_init(struct thread_data *td)
+{
+	struct libaio_data *ld;
+	struct thread_options *to = &td->o;
+	struct libaio_options *o = td->eo;
+
+	ld = calloc(1, sizeof(*ld));
 
 	ld->entries = td->o.iodepth;
 	ld->is_pow2 = is_power_of_2(ld->entries);
@@ -364,13 +412,25 @@ static int fio_libaio_init(struct thread_data *td)
 	ld->io_us = calloc(ld->entries, sizeof(struct io_u *));
 
 	td->io_ops_data = ld;
+	/*
+	 * Check for option conflicts
+	 */
+	if ((fio_option_is_set(to, ioprio) || fio_option_is_set(to, ioprio_class)) &&
+			o->cmdprio_percentage != 0) {
+		log_err("%s: cmdprio_percentage option and mutually exclusive "
+				"prio or prioclass option is set, exiting\n", to->name);
+		td_verror(td, EINVAL, "fio_libaio_init");
+		return 1;
+	}
 	return 0;
 }
 
 static struct ioengine_ops ioengine = {
 	.name			= "libaio",
 	.version		= FIO_IOOPS_VERSION,
+	.flags			= FIO_ASYNCIO_SYNC_TRIM,
 	.init			= fio_libaio_init,
+	.post_init		= fio_libaio_post_init,
 	.prep			= fio_libaio_prep,
 	.queue			= fio_libaio_queue,
 	.commit			= fio_libaio_commit,

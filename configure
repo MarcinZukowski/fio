@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # Fio configure script. Heavily influenced by the manual qemu configure
-# script. Sad this this is easier than autoconf and enemies.
+# script. Sad this is easier than autoconf and enemies.
 #
 
 # set temporary file name
@@ -14,12 +14,13 @@ else
 fi
 
 TMPC="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.c"
+TMPC2="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}-2.c"
 TMPO="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.o"
 TMPE="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.exe"
 
 # NB: do not call "exit" in the trap handler; this is buggy with some shells;
 # see <1285349658-3122-1-git-send-email-loic.minier@linaro.org>
-trap "rm -f $TMPC $TMPO $TMPE" EXIT INT QUIT TERM
+trap "rm -f $TMPC $TMPC2 $TMPO $TMPE" EXIT INT QUIT TERM
 
 rm -rf config.log
 
@@ -35,6 +36,11 @@ fatal() {
   rm -rf $config_host_mak
   rm -rf $config_host_h
   exit 1
+}
+
+# Print result for each configuration test
+print_config() {
+  printf "%-30s%s\n" "$1" "$2"
 }
 
 # Default CFLAGS
@@ -82,14 +88,14 @@ do_cc() {
 }
 
 compile_object() {
-  do_cc $CFLAGS -c -o $TMPO $TMPC
+  do_cc $CFLAGS -Werror-implicit-function-declaration -c -o $TMPO $TMPC
 }
 
 compile_prog() {
   local_cflags="$1"
   local_ldflags="$2 $LIBS"
   echo "Compiling test case $3" >> config.log
-  do_cc $CFLAGS $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
+  do_cc $CFLAGS -Werror-implicit-function-declaration $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
 }
 
 feature_not_found() {
@@ -139,8 +145,14 @@ gas="yes"
 s3awssdk="no"
 pmemblk="no"
 devdax="no"
+pmem="no"
 disable_lex=""
 disable_pmem="no"
+disable_native="no"
+march_set="no"
+libiscsi="no"
+libnbd="no"
+libaio_uring="no"
 prefix=/usr/local
 
 # parse options
@@ -161,6 +173,8 @@ for opt do
   ;;
   --build-32bit-win) build_32bit_win="yes"
   ;;
+  --target-win-ver=*) target_win_ver="$optarg"
+  ;;
   --build-static) build_static="yes"
   ;;
   --enable-gfio) gfio_check="yes"
@@ -169,9 +183,11 @@ for opt do
   ;;
   --disable-rdma) disable_rdma="yes"
   ;;
+  --disable-rados) disable_rados="yes"
+  ;;
   --disable-rbd) disable_rbd="yes"
   ;;
-  --disable-rbd-blkin) disable_rbd_blkin="yes"
+  --disable-http) disable_http="yes"
   ;;
   --disable-gfapi) disable_gfapi="yes"
   ;;
@@ -193,6 +209,18 @@ for opt do
   ;;
   --enable-cuda) enable_cuda="yes"
   ;;
+  --disable-native) disable_native="yes"
+  ;;
+  --with-ime=*) ime_path="$optarg"
+  ;;
+  --enable-libiscsi) libiscsi="yes"
+  ;;
+  --enable-libnbd) libnbd="yes"
+  ;;
+  --disable-tcmalloc) disable_tcmalloc="yes"
+  ;;
+  --enable-libaio-uring) libaio_uring="yes"
+  ;;
   --help)
     show_help="yes"
     ;;
@@ -209,11 +237,15 @@ if test "$show_help" = "yes" ; then
   echo "--cc=                   Specify compiler to use"
   echo "--extra-cflags=         Specify extra CFLAGS to pass to compiler"
   echo "--build-32bit-win       Enable 32-bit build on Windows"
+  echo "--target-win-ver=       Minimum version of Windows to target (XP or 7)"
   echo "--build-static          Build a static fio"
   echo "--esx                   Configure build options for esx"
   echo "--enable-gfio           Enable building of gtk gfio"
   echo "--disable-numa          Disable libnuma even if found"
   echo "--disable-rdma          Disable RDMA support even if found"
+  echo "--disable-rados         Disable Rados support even if found"
+  echo "--disable-rbd           Disable Rados Block Device even if found"
+  echo "--disable-http          Disable HTTP support even if found"
   echo "--disable-gfapi         Disable gfapi"
   echo "--enable-libhdfs        Enable hdfs support"
   echo "--disable-gas           Disable GAS backend and related components"
@@ -224,11 +256,30 @@ if test "$show_help" = "yes" ; then
   echo "--disable-shm           Disable SHM support"
   echo "--disable-optimizations Don't enable compiler optimizations"
   echo "--enable-cuda           Enable GPUDirect RDMA support"
+  echo "--disable-native        Don't build for native host"
+  echo "--with-ime=             Install path for DDN's Infinite Memory Engine"
+  echo "--enable-libiscsi       Enable iscsi support"
+  echo "--enable-libnbd         Enable libnbd (NBD engine) support"
+  echo "--disable-tcmalloc	Disable tcmalloc support"
+  echo "--enable-libaio-uring   Enable libaio emulated over io_uring"
   exit $exit_val
 fi
 
 cross_prefix=${cross_prefix-${CROSS_COMPILE}}
-cc="${CC-${cross_prefix}gcc}"
+# Preferred compiler (can be overriden later after we know the platform):
+#  ${CC} (if set)
+#  ${cross_prefix}gcc (if cross-prefix specified)
+#  gcc if available
+#  clang if available
+if test -z "${CC}${cross_prefix}"; then
+  if has gcc; then
+    cc=gcc
+  elif has clang; then
+    cc=clang
+  fi
+else
+  cc="${CC-${cross_prefix}gcc}"
+fi
 
 if check_define __ANDROID__ ; then
   targetos="Android"
@@ -236,6 +287,8 @@ elif check_define __linux__ ; then
   targetos="Linux"
 elif check_define __OpenBSD__ ; then
   targetos='OpenBSD'
+elif check_define __NetBSD__ ; then
+  targetos='NetBSD'
 elif check_define __sun__ ; then
   targetos='SunOS'
   CFLAGS="$CFLAGS -D_REENTRANT"
@@ -264,7 +317,7 @@ fi
 # cross-compiling to one of these OSes then you'll need to specify
 # the correct CPU with the --cpu option.
 case $targetos in
-AIX|OpenBSD)
+AIX|OpenBSD|NetBSD)
   # Unless explicitly enabled, turn off lex.
   # OpenBSD will hit syntax error when enabled.
   if test -z "$disable_lex" ; then
@@ -272,6 +325,10 @@ AIX|OpenBSD)
   else
     force_no_lex_o="yes"
   fi
+  ;;
+FreeBSD)
+  CFLAGS="$CFLAGS -I/usr/local/include"
+  LDFLAGS="$LDFLAGS -L/usr/local/lib"
   ;;
 Darwin)
   # on Leopard most of the system is 32-bit, so we have to ask the kernel if
@@ -304,49 +361,55 @@ SunOS)
 CYGWIN*)
   # We still force some options, so keep this message here.
   echo "Forcing some known good options on Windows"
-  if test -z "$CC" ; then
+  if test -z "${CC}${cross_prefix}"; then
     if test ! -z "$build_32bit_win" && test "$build_32bit_win" = "yes"; then
-      CC="i686-w64-mingw32-gcc"
-      if test -e "../zlib/contrib/vstudio/vc14/x86/ZlibStatReleaseWithoutAsm/zlibstat.lib"; then
-        echo "Building with zlib support"
-        output_sym "CONFIG_ZLIB"
-        echo "LIBS=../zlib/contrib/vstudio/vc14/x86/ZlibStatReleaseWithoutAsm/zlibstat.lib" >> $config_host_mak
-      fi
+      cc="i686-w64-mingw32-gcc"
     else
-      CC="x86_64-w64-mingw32-gcc"
-      if test -e "../zlib/contrib/vstudio/vc14/x64/ZlibStatReleaseWithoutAsm/zlibstat.lib"; then
-        echo "Building with zlib support"
-        output_sym "CONFIG_ZLIB"
-        echo "LIBS=../zlib/contrib/vstudio/vc14/x64/ZlibStatReleaseWithoutAsm/zlibstat.lib" >> $config_host_mak
-      fi
+      cc="x86_64-w64-mingw32-gcc"
     fi
   fi
-  if test ! -z "$build_32bit_win" && test "$build_32bit_win" = "yes"; then
-    output_sym "CONFIG_32BIT"
-  else
-    output_sym "CONFIG_64BIT_LLP64"
+
+  target_win_ver=$(echo "$target_win_ver" | tr '[:lower:]' '[:upper:]')
+  if test -z "$target_win_ver"; then
+    # Default Windows API target
+    target_win_ver="7"
   fi
+  if test "$target_win_ver" = "XP"; then
+    output_sym "CONFIG_WINDOWS_XP"
+  elif test "$target_win_ver" = "7"; then
+    output_sym "CONFIG_WINDOWS_7"
+    CFLAGS="$CFLAGS -D_WIN32_WINNT=0x0601"
+  else
+    fatal "Unknown target Windows version"
+  fi
+
   # We need this to be output_sym'd here because this is Windows specific.
   # The regular configure path never sets this config.
   output_sym "CONFIG_WINDOWSAIO"
   # We now take the regular configuration path without having exit 0 here.
   # Flags below are still necessary mostly for MinGW.
-  socklen_t="yes"
-  sfaa="yes"
+  build_static="yes"
   rusage_thread="yes"
   fdatasync="yes"
   clock_gettime="yes" # clock_monotonic probe has dependency on this
   clock_monotonic="yes"
-  gettimeofday="yes"
   sched_idle="yes"
-  tcp_nodelay="yes"
-  tls_thread="yes"
-  static_assert="yes"
-  ipv6="yes"
-  echo "CC=$CC" >> $config_host_mak
-  echo "BUILD_CFLAGS=$CFLAGS -I../zlib -include config-host.h -D_GNU_SOURCE" >> $config_host_mak
   ;;
 esac
+
+# Now we know the target platform we can have another guess at the preferred
+# compiler when it wasn't explictly set
+if test -z "${CC}${cross_prefix}"; then
+  if test "$targetos" = "FreeBSD" || test "$targetos" = "Darwin"; then
+    if has clang; then
+      cc=clang
+    fi
+  fi
+fi
+if test -z "$cc"; then
+    echo "configure: failed to find compiler"
+    exit 1
+fi
 
 if test ! -z "$cpu" ; then
   # command line argument
@@ -418,18 +481,6 @@ case "$cpu" in
   ;;
 esac
 
-if test -z "$CC" ; then
-  if test "$targetos" = "FreeBSD"; then
-    if has clang; then
-      CC=clang
-    else
-      CC=gcc
-    fi
-  fi
-fi
-
-cc="${CC-${cross_prefix}gcc}"
-
 ##########################################
 # check cross compile
 
@@ -483,11 +534,14 @@ EOF
 fi
 
 
-echo "Operating system              $targetos"
-echo "CPU                           $cpu"
-echo "Big endian                    $bigendian"
-echo "Compiler                      $cc"
-echo "Cross compile                 $cross_compile"
+print_config "Operating system" "$targetos"
+print_config "CPU" "$cpu"
+print_config "Big endian" "$bigendian"
+if test ! -z "$target_win_ver"; then
+  print_config "Target Windows version" "$target_win_ver"
+fi
+print_config "Compiler" "$cc"
+print_config "Cross compile" "$cross_compile"
 echo
 
 ##########################################
@@ -498,7 +552,7 @@ if test "$build_static" = "yes" ; then
 else
   build_static="no"
 fi
-echo "Static build                  $build_static"
+print_config "Static build" "$build_static"
 
 ##########################################
 # check for wordsize
@@ -519,7 +573,7 @@ elif compile_prog "-DWORDSIZE=64" "" "wordsize"; then
 else
   fatal "Unknown wordsize"
 fi
-echo "Wordsize                      $wordsize"
+print_config "Wordsize" "$wordsize"
 
 ##########################################
 # zlib probe
@@ -540,7 +594,7 @@ if compile_prog "" "-lz" "zlib" ; then
   zlib=yes
   LIBS="-lz $LIBS"
 fi
-echo "zlib                          $zlib"
+print_config "zlib" "$zlib"
 
 ##########################################
 # linux-aio probe
@@ -557,17 +611,23 @@ int main(void)
   return 0;
 }
 EOF
-  if compile_prog "" "-laio" "libaio" ; then
+  if test "$libaio_uring" = "yes" && compile_prog "" "-luring" "libaio io_uring" ; then
     libaio=yes
+    LIBS="-luring $LIBS"
+  elif compile_prog "" "-laio" "libaio" ; then
+    libaio=yes
+    libaio_uring=no
     LIBS="-laio $LIBS"
   else
     if test "$libaio" = "yes" ; then
       feature_not_found "linux AIO" "libaio-dev or libaio-devel"
     fi
     libaio=no
+    libaio_uring=no
   fi
 fi
-echo "Linux AIO support             $libaio"
+print_config "Linux AIO support" "$libaio"
+print_config "Linux AIO over io_uring" "$libaio_uring"
 
 ##########################################
 # posix aio probe
@@ -588,13 +648,13 @@ int main(void)
 EOF
 if compile_prog "" "" "posixaio" ; then
   posix_aio="yes"
-elif compile_prog "" "-lrt" "posixaio"; then
+elif compile_prog "" "-lrt" "posixaio -lrt"; then
   posix_aio="yes"
   posix_aio_lrt="yes"
   LIBS="-lrt $LIBS"
 fi
-echo "POSIX AIO support             $posix_aio"
-echo "POSIX AIO support needs -lrt  $posix_aio_lrt"
+print_config "POSIX AIO support" "$posix_aio"
+print_config "POSIX AIO support needs -lrt" "$posix_aio_lrt"
 
 ##########################################
 # posix aio fsync probe
@@ -616,7 +676,7 @@ EOF
     posix_aio_fsync=yes
   fi
 fi
-echo "POSIX AIO fsync               $posix_aio_fsync"
+print_config "POSIX AIO fsync" "$posix_aio_fsync"
 
 ##########################################
 # POSIX pshared attribute probe
@@ -646,7 +706,50 @@ EOF
 if compile_prog "" "$LIBS" "posix_pshared" ; then
   posix_pshared=yes
 fi
-echo "POSIX pshared support         $posix_pshared"
+print_config "POSIX pshared support" "$posix_pshared"
+
+##########################################
+# POSIX pthread_condattr_setclock() probe
+if test "$pthread_condattr_setclock" != "yes" ; then
+  pthread_condattr_setclock="no"
+fi
+cat > $TMPC <<EOF
+#include <pthread.h>
+int main(void)
+{
+  pthread_condattr_t condattr;
+  pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC);
+  return 0;
+}
+EOF
+if compile_prog "" "$LIBS" "pthread_condattr_setclock" ; then
+  pthread_condattr_setclock=yes
+elif compile_prog "" "$LIBS -lpthread" "pthread_condattr_setclock" ; then
+  pthread_condattr_setclock=yes
+  LIBS="$LIBS -lpthread"
+fi
+print_config "pthread_condattr_setclock()" "$pthread_condattr_setclock"
+
+##########################################
+# pthread_sigmask() probe
+if test "$pthread_sigmask" != "yes" ; then
+  pthread_sigmask="no"
+fi
+cat > $TMPC <<EOF
+#include <stddef.h> /* NULL */
+#include <signal.h> /* pthread_sigmask() */
+int main(void)
+{
+  return pthread_sigmask(0, NULL, NULL);
+}
+EOF
+if compile_prog "" "$LIBS" "pthread_sigmask" ; then
+  pthread_sigmask=yes
+elif compile_prog "" "$LIBS -lpthread" "pthread_sigmask" ; then
+  pthread_sigmask=yes
+  LIBS="$LIBS -lpthread"
+fi
+print_config "pthread_sigmask()" "$pthread_sigmask"
 
 ##########################################
 # solaris aio probe
@@ -668,7 +771,7 @@ if compile_prog "" "-laio" "solarisaio" ; then
   solaris_aio=yes
   LIBS="-laio $LIBS"
 fi
-echo "Solaris AIO support           $solaris_aio"
+print_config "Solaris AIO support" "$solaris_aio"
 
 ##########################################
 # __sync_fetch_and_add test
@@ -692,7 +795,45 @@ EOF
 if compile_prog "" "" "__sync_fetch_and_add()" ; then
     sfaa="yes"
 fi
-echo "__sync_fetch_and_add          $sfaa"
+print_config "__sync_fetch_and_add" "$sfaa"
+
+##########################################
+# __sync_synchronize() test
+if test "$sync_sync" != "yes" ; then
+  sync_sync="no"
+fi
+cat > $TMPC << EOF
+#include <inttypes.h>
+
+int main(int argc, char **argv)
+{
+  __sync_synchronize();
+  return 0;
+}
+EOF
+if compile_prog "" "" "__sync_synchronize()" ; then
+    sync_sync="yes"
+fi
+print_config "__sync_synchronize" "$sync_sync"
+
+##########################################
+# __sync_val_compare_and_swap() test
+if test "$cmp_swap" != "yes" ; then
+  cmp_swap="no"
+fi
+cat > $TMPC << EOF
+#include <inttypes.h>
+
+int main(int argc, char **argv)
+{
+  int x = 0;
+  return __sync_val_compare_and_swap(&x, 1, 2);
+}
+EOF
+if compile_prog "" "" "__sync_val_compare_and_swap()" ; then
+    cmp_swap="yes"
+fi
+print_config "__sync_val_compare_and_swap" "$cmp_swap"
 
 ##########################################
 # libverbs probe
@@ -700,19 +841,18 @@ if test "$libverbs" != "yes" ; then
   libverbs="no"
 fi
 cat > $TMPC << EOF
-#include <stdio.h>
-#include <infiniband/arch.h>
+#include <infiniband/verbs.h>
 int main(int argc, char **argv)
 {
   struct ibv_pd *pd = ibv_alloc_pd(NULL);
-  return 0;
+  return pd != NULL;
 }
 EOF
 if test "$disable_rdma" != "yes" && compile_prog "" "-libverbs" "libverbs" ; then
     libverbs="yes"
     LIBS="-libverbs $LIBS"
 fi
-echo "libverbs                      $libverbs"
+print_config "libverbs" "$libverbs"
 
 ##########################################
 # rdmacm probe
@@ -732,7 +872,41 @@ if test "$disable_rdma" != "yes" && compile_prog "" "-lrdmacm" "rdma"; then
     rdmacm="yes"
     LIBS="-lrdmacm $LIBS"
 fi
-echo "rdmacm                        $rdmacm"
+print_config "rdmacm" "$rdmacm"
+
+##########################################
+# asprintf() and vasprintf() probes
+if test "$have_asprintf" != "yes" ; then
+  have_asprintf="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+  return asprintf(NULL, "%s", "str") == 0;
+}
+EOF
+if compile_prog "" "" "have_asprintf"; then
+    have_asprintf="yes"
+fi
+print_config "asprintf()" "$have_asprintf"
+
+if test "$have_vasprintf" != "yes" ; then
+  have_vasprintf="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+  return vasprintf(NULL, "%s", NULL) == 0;
+}
+EOF
+if compile_prog "" "" "have_vasprintf"; then
+    have_vasprintf="yes"
+fi
+print_config "vasprintf()" "$have_vasprintf"
 
 ##########################################
 # Linux fallocate probe
@@ -752,7 +926,7 @@ EOF
 if compile_prog "" "" "linux_fallocate"; then
     linux_fallocate="yes"
 fi
-echo "Linux fallocate               $linux_fallocate"
+print_config "Linux fallocate" "$linux_fallocate"
 
 ##########################################
 # POSIX fadvise probe
@@ -771,7 +945,7 @@ EOF
 if compile_prog "" "" "posix_fadvise"; then
     posix_fadvise="yes"
 fi
-echo "POSIX fadvise                 $posix_fadvise"
+print_config "POSIX fadvise" "$posix_fadvise"
 
 ##########################################
 # POSIX fallocate probe
@@ -790,7 +964,7 @@ EOF
 if compile_prog "" "" "posix_fallocate"; then
     posix_fallocate="yes"
 fi
-echo "POSIX fallocate               $posix_fallocate"
+print_config "POSIX fallocate" "$posix_fallocate"
 
 ##########################################
 # sched_set/getaffinity 2 or 3 argument test
@@ -823,8 +997,8 @@ EOF
     linux_2arg_affinity="yes"
   fi
 fi
-echo "sched_setaffinity(3 arg)      $linux_3arg_affinity"
-echo "sched_setaffinity(2 arg)      $linux_2arg_affinity"
+print_config "sched_setaffinity(3 arg)" "$linux_3arg_affinity"
+print_config "sched_setaffinity(2 arg)" "$linux_2arg_affinity"
 
 ##########################################
 # clock_gettime probe
@@ -845,7 +1019,7 @@ elif compile_prog "" "-lrt" "clock_gettime"; then
     clock_gettime="yes"
     LIBS="-lrt $LIBS"
 fi
-echo "clock_gettime                 $clock_gettime"
+print_config "clock_gettime" "$clock_gettime"
 
 ##########################################
 # CLOCK_MONOTONIC probe
@@ -865,7 +1039,7 @@ EOF
       clock_monotonic="yes"
   fi
 fi
-echo "CLOCK_MONOTONIC               $clock_monotonic"
+print_config "CLOCK_MONOTONIC" "$clock_monotonic"
 
 ##########################################
 # CLOCK_MONOTONIC_RAW probe
@@ -885,7 +1059,7 @@ EOF
       clock_monotonic_raw="yes"
   fi
 fi
-echo "CLOCK_MONOTONIC_RAW           $clock_monotonic_raw"
+print_config "CLOCK_MONOTONIC_RAW" "$clock_monotonic_raw"
 
 ##########################################
 # CLOCK_MONOTONIC_PRECISE probe
@@ -905,7 +1079,7 @@ EOF
       clock_monotonic_precise="yes"
   fi
 fi
-echo "CLOCK_MONOTONIC_PRECISE       $clock_monotonic_precise"
+print_config "CLOCK_MONOTONIC_PRECISE" "$clock_monotonic_precise"
 
 ##########################################
 # clockid_t probe
@@ -925,7 +1099,7 @@ EOF
 if compile_prog "" "$LIBS" "clockid_t"; then
   clockid_t="yes"
 fi
-echo "clockid_t                     $clockid_t"
+print_config "clockid_t" "$clockid_t"
 
 ##########################################
 # gettimeofday() probe
@@ -944,7 +1118,7 @@ EOF
 if compile_prog "" "" "gettimeofday"; then
     gettimeofday="yes"
 fi
-echo "gettimeofday                  $gettimeofday"
+print_config "gettimeofday" "$gettimeofday"
 
 ##########################################
 # fdatasync() probe
@@ -962,7 +1136,60 @@ EOF
 if compile_prog "" "" "fdatasync"; then
   fdatasync="yes"
 fi
-echo "fdatasync                     $fdatasync"
+print_config "fdatasync" "$fdatasync"
+
+##########################################
+# pipe() probe
+if test "$pipe" != "yes" ; then
+  pipe="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  int fd[2];
+  return pipe(fd);
+}
+EOF
+if compile_prog "" "" "pipe"; then
+  pipe="yes"
+fi
+print_config "pipe()" "$pipe"
+
+##########################################
+# pipe2() probe
+if test "$pipe2" != "yes" ; then
+  pipe2="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  int fd[2];
+  return pipe2(fd, 0);
+}
+EOF
+if compile_prog "" "" "pipe2"; then
+  pipe2="yes"
+fi
+print_config "pipe2()" "$pipe2"
+
+##########################################
+# pread() probe
+if test "$pread" != "yes" ; then
+  pread="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  return pread(0, NULL, 0, 0);
+}
+EOF
+if compile_prog "" "" "pread"; then
+  pread="yes"
+fi
+print_config "pread()" "$pread"
 
 ##########################################
 # sync_file_range() probe
@@ -984,7 +1211,7 @@ EOF
 if compile_prog "" "" "sync_file_range"; then
   sync_file_range="yes"
 fi
-echo "sync_file_range               $sync_file_range"
+print_config "sync_file_range" "$sync_file_range"
 
 ##########################################
 # ext4 move extent probe
@@ -1008,7 +1235,7 @@ elif test $targetos = "Linux" ; then
   # work. Takes a while to bubble back.
   ext4_me="yes"
 fi
-echo "EXT4 move extent              $ext4_me"
+print_config "EXT4 move extent" "$ext4_me"
 
 ##########################################
 # splice probe
@@ -1026,7 +1253,7 @@ EOF
 if compile_prog "" "" "linux splice"; then
   linux_splice="yes"
 fi
-echo "Linux splice(2)               $linux_splice"
+print_config "Linux splice(2)" "$linux_splice"
 
 ##########################################
 # GUASI probe
@@ -1045,29 +1272,7 @@ EOF
 if compile_prog "" "" "guasi"; then
   guasi="yes"
 fi
-echo "GUASI                         $guasi"
-
-##########################################
-# fusion-aw probe
-if test "$fusion_aw" != "yes" ; then
-  fusion_aw="no"
-fi
-cat > $TMPC << EOF
-#include <nvm/nvm_primitives.h>
-int main(int argc, char **argv)
-{
-  nvm_version_t ver_info;
-  nvm_handle_t handle;
-
-  handle = nvm_get_handle(0, &ver_info);
-  return nvm_atomic_write(handle, 0, 0, 0);
-}
-EOF
-if compile_prog "" "-L/usr/lib/fio -L/usr/lib/nvm -lnvm-primitives -ldl -lpthread" "fusion-aw"; then
-  LIBS="-L/usr/lib/fio -L/usr/lib/nvm -lnvm-primitives -ldl -lpthread $LIBS"
-  fusion_aw="yes"
-fi
-echo "Fusion-io atomic engine       $fusion_aw"
+print_config "GUASI" "$guasi"
 
 ##########################################
 # libnuma probe
@@ -1085,7 +1290,7 @@ if test "$disable_numa" != "yes"  && compile_prog "" "-lnuma" "libnuma"; then
   libnuma="yes"
   LIBS="-lnuma $LIBS"
 fi
-echo "libnuma                       $libnuma"
+print_config "libnuma" "$libnuma"
 
 ##########################################
 # libnuma 2.x version API, initialize with "no" only if $libnuma is set to "yes"
@@ -1102,7 +1307,7 @@ EOF
 if compile_prog "" "" "libnuma api"; then
   libnuma_v2="yes"
 fi
-echo "libnuma v2                    $libnuma_v2"
+print_config "libnuma v2" "$libnuma_v2"
 fi
 
 ##########################################
@@ -1122,7 +1327,7 @@ EOF
 if compile_prog "" "" "strsep"; then
   strsep="yes"
 fi
-echo "strsep                        $strsep"
+print_config "strsep" "$strsep"
 
 ##########################################
 # strcasestr() probe
@@ -1139,7 +1344,7 @@ EOF
 if compile_prog "" "" "strcasestr"; then
   strcasestr="yes"
 fi
-echo "strcasestr                    $strcasestr"
+print_config "strcasestr" "$strcasestr"
 
 ##########################################
 # strlcat() probe
@@ -1160,7 +1365,7 @@ EOF
 if compile_prog "" "" "strlcat"; then
   strlcat="yes"
 fi
-echo "strlcat                       $strlcat"
+print_config "strlcat" "$strlcat"
 
 ##########################################
 # getopt_long_only() probe
@@ -1173,14 +1378,14 @@ cat > $TMPC << EOF
 #include <getopt.h>
 int main(int argc, char **argv)
 {
-  int c = getopt_long_only(argc, argv, NULL, NULL, NULL);
+  int c = getopt_long_only(argc, argv, "", NULL, NULL);
   return c;
 }
 EOF
 if compile_prog "" "" "getopt_long_only"; then
   getopt_long_only="yes"
 fi
-echo "getopt_long_only()            $getopt_long_only"
+print_config "getopt_long_only()" "$getopt_long_only"
 
 ##########################################
 # inet_aton() probe
@@ -1188,8 +1393,12 @@ if test "$inet_aton" != "yes" ; then
   inet_aton="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#endif
 #include <stdio.h>
 int main(int argc, char **argv)
 {
@@ -1200,7 +1409,7 @@ EOF
 if compile_prog "" "" "inet_aton"; then
   inet_aton="yes"
 fi
-echo "inet_aton                     $inet_aton"
+print_config "inet_aton" "$inet_aton"
 
 ##########################################
 # socklen_t probe
@@ -1208,7 +1417,12 @@ if test "$socklen_t" != "yes" ; then
   socklen_t="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
+#endif
 int main(int argc, char **argv)
 {
   socklen_t len = 0;
@@ -1218,7 +1432,7 @@ EOF
 if compile_prog "" "" "socklen_t"; then
   socklen_t="yes"
 fi
-echo "socklen_t                     $socklen_t"
+print_config "socklen_t" "$socklen_t"
 
 ##########################################
 # Whether or not __thread is supported for TLS
@@ -1236,7 +1450,7 @@ EOF
 if compile_prog "" "" "__thread"; then
   tls_thread="yes"
 fi
-echo "__thread                      $tls_thread"
+print_config "__thread" "$tls_thread"
 
 ##########################################
 # Check if we have required gtk/glib support for gfio
@@ -1256,37 +1470,36 @@ int main(void)
   return GTK_CHECK_VERSION(2, 18, 0) ? 0 : 1; /* 0 on success */
 }
 EOF
-GTK_CFLAGS=$(pkg-config --cflags gtk+-2.0 gthread-2.0)
+GTK_CFLAGS=$(${cross_prefix}pkg-config --cflags gtk+-2.0 gthread-2.0)
 ORG_LDFLAGS=$LDFLAGS
 LDFLAGS=$(echo $LDFLAGS | sed s/"-static"//g)
 if test "$?" != "0" ; then
   echo "configure: gtk and gthread not found"
   exit 1
 fi
-GTK_LIBS=$(pkg-config --libs gtk+-2.0 gthread-2.0)
+GTK_LIBS=$(${cross_prefix}pkg-config --libs gtk+-2.0 gthread-2.0)
 if test "$?" != "0" ; then
   echo "configure: gtk and gthread not found"
   exit 1
 fi
-if compile_prog "$GTK_CFLAGS" "$GTK_LIBS" "gfio" ; then
-  $TMPE
-  if test "$?" = "0" ; then
+if ! ${cross_prefix}pkg-config --atleast-version 2.18.0 gtk+-2.0; then
+  echo "GTK found, but need version 2.18 or higher"
+  gfio="no"
+else
+  if compile_prog "$GTK_CFLAGS" "$GTK_LIBS" "gfio" ; then
     gfio="yes"
     GFIO_LIBS="$LIBS $GTK_LIBS"
     CFLAGS="$CFLAGS $GTK_CFLAGS"
   else
-    echo "GTK found, but need version 2.18 or higher"
+    echo "Please install gtk and gdk libraries"
     gfio="no"
   fi
-else
-  echo "Please install gtk and gdk libraries"
-  gfio="no"
 fi
 LDFLAGS=$ORG_LDFLAGS
 fi
 
 if test "$gfio_check" = "yes" ; then
-  echo "gtk 2.18 or higher            $gfio"
+  print_config "gtk 2.18 or higher" "$gfio"
 fi
 
 ##########################################
@@ -1307,7 +1520,7 @@ EOF
 if compile_prog "" "" "RUSAGE_THREAD"; then
   rusage_thread="yes"
 fi
-echo "RUSAGE_THREAD                 $rusage_thread"
+print_config "RUSAGE_THREAD" "$rusage_thread"
 
 ##########################################
 # Check whether we have SCHED_IDLE
@@ -1325,7 +1538,7 @@ EOF
 if compile_prog "" "" "SCHED_IDLE"; then
   sched_idle="yes"
 fi
-echo "SCHED_IDLE                    $sched_idle"
+print_config "SCHED_IDLE" "$sched_idle"
 
 ##########################################
 # Check whether we have TCP_NODELAY
@@ -1333,10 +1546,14 @@ if test "$tcp_nodelay" != "yes" ; then
   tcp_nodelay="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#endif
 int main(int argc, char **argv)
 {
   return getsockopt(0, 0, TCP_NODELAY, NULL, NULL);
@@ -1344,8 +1561,11 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "TCP_NODELAY"; then
   tcp_nodelay="yes"
+elif compile_prog "" "-lws2_32" "TCP_NODELAY"; then
+  tcp_nodelay="yes"
+  LIBS="$LIBS -lws2_32"
 fi
-echo "TCP_NODELAY                   $tcp_nodelay"
+print_config "TCP_NODELAY" "$tcp_nodelay"
 
 ##########################################
 # Check whether we have SO_SNDBUF
@@ -1353,10 +1573,14 @@ if test "$window_size" != "yes" ; then
   window_size="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#endif
 int main(int argc, char **argv)
 {
   setsockopt(0, SOL_SOCKET, SO_SNDBUF, NULL, 0);
@@ -1365,8 +1589,11 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "SO_SNDBUF"; then
   window_size="yes"
+elif compile_prog "" "-lws2_32" "SO_SNDBUF"; then
+  window_size="yes"
+  LIBS="$LIBS -lws2_32"
 fi
-echo "Net engine window_size        $window_size"
+print_config "Net engine window_size" "$window_size"
 
 ##########################################
 # Check whether we have TCP_MAXSEG
@@ -1374,12 +1601,16 @@ if test "$mss" != "yes" ; then
   mss="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 int main(int argc, char **argv)
 {
   return setsockopt(0, IPPROTO_TCP, TCP_MAXSEG, NULL, 0);
@@ -1387,8 +1618,11 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "TCP_MAXSEG"; then
   mss="yes"
+elif compile_prog "" "-lws2_32" "TCP_MAXSEG"; then
+  mss="yes"
+  LIBS="$LIBS -lws2_32"
 fi
-echo "TCP_MAXSEG                    $mss"
+print_config "TCP_MAXSEG" "$mss"
 
 ##########################################
 # Check whether we have RLIMIT_MEMLOCK
@@ -1407,7 +1641,7 @@ EOF
 if compile_prog "" "" "RLIMIT_MEMLOCK"; then
   rlimit_memlock="yes"
 fi
-echo "RLIMIT_MEMLOCK                $rlimit_memlock"
+print_config "RLIMIT_MEMLOCK" "$rlimit_memlock"
 
 ##########################################
 # Check whether we have pwritev/preadv
@@ -1425,7 +1659,7 @@ EOF
 if compile_prog "" "" "pwritev"; then
   pwritev="yes"
 fi
-echo "pwritev/preadv                $pwritev"
+print_config "pwritev/preadv" "$pwritev"
 
 ##########################################
 # Check whether we have pwritev2/preadv2
@@ -1443,7 +1677,7 @@ EOF
 if compile_prog "" "" "pwritev2"; then
   pwritev2="yes"
 fi
-echo "pwritev2/preadv2              $pwritev2"
+print_config "pwritev2/preadv2" "$pwritev2"
 
 ##########################################
 # Check whether we have the required functions for ipv6
@@ -1451,10 +1685,15 @@ if test "$ipv6" != "yes" ; then
   ipv6="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#endif
 #include <stdio.h>
 int main(int argc, char **argv)
 {
@@ -1472,7 +1711,91 @@ EOF
 if compile_prog "" "" "ipv6"; then
   ipv6="yes"
 fi
-echo "IPv6 helpers                  $ipv6"
+print_config "IPv6 helpers" "$ipv6"
+
+##########################################
+# check for http
+if test "$http" != "yes" ; then
+  http="no"
+fi
+# check for openssl >= 1.1.0, which uses an opaque HMAC_CTX pointer
+cat > $TMPC << EOF
+#include <curl/curl.h>
+#include <openssl/hmac.h>
+
+int main(int argc, char **argv)
+{
+  CURL *curl;
+  HMAC_CTX *ctx;
+
+  curl = curl_easy_init();
+  curl_easy_cleanup(curl);
+
+  ctx = HMAC_CTX_new();
+  HMAC_CTX_reset(ctx);
+  HMAC_CTX_free(ctx);
+  return 0;
+}
+EOF
+# openssl < 1.1.0 uses the HMAC_CTX type directly
+cat > $TMPC2 << EOF
+#include <curl/curl.h>
+#include <openssl/hmac.h>
+
+int main(int argc, char **argv)
+{
+  CURL *curl;
+  HMAC_CTX ctx;
+
+  curl = curl_easy_init();
+  curl_easy_cleanup(curl);
+
+  HMAC_CTX_init(&ctx);
+  HMAC_CTX_cleanup(&ctx);
+  return 0;
+}
+EOF
+if test "$disable_http" != "yes"; then
+  HTTP_LIBS="-lcurl -lssl -lcrypto"
+  if compile_prog "" "$HTTP_LIBS" "curl-new-ssl"; then
+    output_sym "CONFIG_HAVE_OPAQUE_HMAC_CTX"
+    http="yes"
+    LIBS="$HTTP_LIBS $LIBS"
+  elif mv $TMPC2 $TMPC && compile_prog "" "$HTTP_LIBS" "curl-old-ssl"; then
+    http="yes"
+    LIBS="$HTTP_LIBS $LIBS"
+  fi
+fi
+print_config "http engine" "$http"
+
+##########################################
+# check for rados
+if test "$rados" != "yes" ; then
+  rados="no"
+fi
+cat > $TMPC << EOF
+#include <rados/librados.h>
+
+int main(int argc, char **argv)
+{
+  rados_t cluster;
+  rados_ioctx_t io_ctx;
+  const char cluster_name[] = "ceph";
+  const char user_name[] = "client.admin";
+  const char pool[] = "rados";
+
+  /* The rados_create2 signature required was only introduced in ceph 0.65 */
+  rados_create2(&cluster, cluster_name, user_name, 0);
+  rados_ioctx_create(cluster, pool, &io_ctx);
+
+  return 0;
+}
+EOF
+if test "$disable_rados" != "yes"  && compile_prog "" "-lrados" "rados"; then
+  LIBS="-lrados $LIBS"
+  rados="yes"
+fi
+print_config "Rados engine" "$rados"
 
 ##########################################
 # check for rbd
@@ -1486,12 +1809,16 @@ int main(int argc, char **argv)
 {
   rados_t cluster;
   rados_ioctx_t io_ctx;
+  const char cluster_name[] = "ceph";
+  const char user_name[] = "client.admin";
   const char pool[] = "rbd";
-
   int major, minor, extra;
-  rbd_version(&major, &minor, &extra);
 
+  rbd_version(&major, &minor, &extra);
+  /* The rados_create2 signature required was only introduced in ceph 0.65 */
+  rados_create2(&cluster, cluster_name, user_name, 0);
   rados_ioctx_create(cluster, pool, &io_ctx);
+
   return 0;
 }
 EOF
@@ -1499,7 +1826,7 @@ if test "$disable_rbd" != "yes"  && compile_prog "" "-lrbd -lrados" "rbd"; then
   LIBS="-lrbd -lrados $LIBS"
   rbd="yes"
 fi
-echo "Rados Block Device engine     $rbd"
+print_config "Rados Block Device engine" "$rbd"
 
 ##########################################
 # check for rbd_poll
@@ -1526,11 +1853,11 @@ EOF
 if compile_prog "" "-lrbd -lrados" "rbd"; then
   rbd_poll="yes"
 fi
-echo "rbd_poll                      $rbd_poll"
+print_config "rbd_poll" "$rbd_poll"
 fi
 
 ##########################################
-# check for rbd_invaidate_cache()
+# check for rbd_invalidate_cache()
 if test "$rbd_inval" != "yes" ; then
   rbd_inval="no"
 fi
@@ -1548,38 +1875,8 @@ EOF
 if compile_prog "" "-lrbd -lrados" "rbd"; then
   rbd_inval="yes"
 fi
-echo "rbd_invalidate_cache          $rbd_inval"
+print_config "rbd_invalidate_cache" "$rbd_inval"
 fi
-
-##########################################
-# check for blkin
-if test "$rbd_blkin" != "yes" ; then
-  rbd_blkin="no"
-fi
-cat > $TMPC << EOF
-#include <rbd/librbd.h>
-#include <zipkin_c.h>
-
-int main(int argc, char **argv)
-{
-  int r;
-  struct blkin_trace_info t_info;
-  blkin_init_trace_info(&t_info);
-  rbd_completion_t completion;
-  rbd_image_t image;
-  uint64_t off;
-  size_t len;
-  const char *buf;
-  r = rbd_aio_write_traced(image, off, len, buf, completion, &t_info);
-  return 0;
-}
-EOF
-if test "$disable_rbd" != "yes" && test "$disable_rbd_blkin" != "yes" \
- && compile_prog "" "-lrbd -lrados -lblkin" "rbd_blkin"; then
-  LIBS="-lblkin $LIBS"
-  rbd_blkin="yes"
-fi
-echo "rbd blkin tracing             $rbd_blkin"
 
 ##########################################
 # Check whether we have setvbuf
@@ -1599,7 +1896,7 @@ EOF
 if compile_prog "" "" "setvbuf"; then
   setvbuf="yes"
 fi
-echo "setvbuf                       $setvbuf"
+print_config "setvbuf" "$setvbuf"
 
 ##########################################
 # check for gfapi
@@ -1620,7 +1917,7 @@ if test "$disable_gfapi" != "yes"  && compile_prog "" "-lgfapi -lglusterfs" "gfa
   LIBS="-lgfapi -lglusterfs $LIBS"
   gfapi="yes"
 fi
- echo "Gluster API engine            $gfapi"
+print_config "Gluster API engine" "$gfapi"
 
 ##########################################
 # check for gfapi fadvise support, initialize with "no" only if $gfapi is set to "yes"
@@ -1640,7 +1937,25 @@ EOF
 if compile_prog "" "-lgfapi -lglusterfs" "gfapi"; then
   gf_fadvise="yes"
 fi
-echo "Gluster API use fadvise       $gf_fadvise"
+print_config "Gluster API use fadvise" "$gf_fadvise"
+fi
+
+##########################################
+# check for newer gfapi
+if test "$gfapi" = "yes" ; then
+gf_new="no"
+cat > $TMPC << EOF
+#include <glusterfs/api/glfs.h>
+
+int main(int argc, char **argv)
+{
+  return glfs_fsync(NULL, NULL, NULL) && glfs_ftruncate(NULL, 0, NULL, NULL);
+}
+EOF
+if compile_prog "" "-lgfapi -lglusterfs" "gf new api"; then
+  gf_new="yes"
+fi
+print_config "Gluster new API" "$gf_new"
 fi
 
 ##########################################
@@ -1660,7 +1975,7 @@ EOF
 if compile_prog "" "-lgfapi -lglusterfs" "gf trim"; then
   gf_trim="yes"
 fi
-echo "Gluster API trim support      $gf_trim"
+print_config "Gluster API trim support" "$gf_trim"
 fi
 
 ##########################################
@@ -1690,11 +2005,11 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "s390_z196_facilities"; then
   $TMPE
-  if [[ $? -eq 0 ]]; then
+  if [ $? -eq 0 ]; then
   	s390_z196_facilities="yes"
   fi
 fi
-echo "s390_z196_facilities          $s390_z196_facilities"
+print_config "s390_z196_facilities" "$s390_z196_facilities"
 
 ##########################################
 # Check if we have required environment variables configured for libhdfs
@@ -1720,7 +2035,7 @@ if test "$libhdfs" = "yes" ; then
     FIO_HDFS_CPU="amd64"
   fi
 fi
-echo "HDFS engine                   $libhdfs"
+print_config "HDFS engine" "$libhdfs"
 
 ##########################################
 # Check if we have proper config for AWS SDK
@@ -1762,7 +2077,7 @@ EOF
 if compile_prog "" "" "mtd"; then
   mtd="yes"
 fi
-echo "MTD                           $mtd"
+print_config "MTD" "$mtd"
 
 ##########################################
 # Check whether we have libpmem
@@ -1782,7 +2097,7 @@ if compile_prog "" "-lpmem" "libpmem"; then
   libpmem="yes"
   LIBS="-lpmem $LIBS"
 fi
-echo "libpmem                       $libpmem"
+print_config "libpmem" "$libpmem"
 
 ##########################################
 # Check whether we have libpmemblk
@@ -1805,10 +2120,11 @@ EOF
     LIBS="-lpmemblk $LIBS"
   fi
 fi
-echo "libpmemblk                    $libpmemblk"
+print_config "libpmemblk" "$libpmemblk"
 
 # Choose the ioengines
 if test "$libpmem" = "yes" && test "$disable_pmem" = "no"; then
+  pmem="yes"
   devdax="yes"
   if test "$libpmemblk" = "yes"; then
     pmemblk="yes"
@@ -1817,11 +2133,71 @@ fi
 
 ##########################################
 # Report whether pmemblk engine is enabled
-echo "NVML pmemblk engine           $pmemblk"
+print_config "PMDK pmemblk engine" "$pmemblk"
 
 ##########################################
 # Report whether dev-dax engine is enabled
-echo "NVML dev-dax engine           $devdax"
+print_config "PMDK dev-dax engine" "$devdax"
+
+##########################################
+# Report whether libpmem engine is enabled
+print_config "PMDK libpmem engine" "$pmem"
+
+##########################################
+# Check whether we support DDN's IME
+if test "$libime" != "yes" ; then
+  libime="no"
+fi
+cat > $TMPC << EOF
+#include <ime_native.h>
+int main(int argc, char **argv)
+{
+  int rc;
+  ime_native_init();
+  rc = ime_native_finalize();
+  return 0;
+}
+EOF
+if compile_prog "-I${ime_path}/include" "-L${ime_path}/lib -lim_client" "libime"; then
+  libime="yes"
+  CFLAGS="-I${ime_path}/include $CFLAGS"
+  LDFLAGS="-Wl,-rpath ${ime_path}/lib -L${ime_path}/lib $LDFLAGS"
+  LIBS="-lim_client $LIBS"
+fi
+print_config "DDN's Infinite Memory Engine" "$libime"
+
+##########################################
+# Check if we have required environment variables configured for libiscsi
+if test "$libiscsi" = "yes" ; then
+  if $(pkg-config --atleast-version=1.9.0 libiscsi); then
+    libiscsi="yes"
+    libiscsi_cflags=$(pkg-config --cflags libiscsi)
+    libiscsi_libs=$(pkg-config --libs libiscsi)
+  else
+    if test "$libiscsi" = "yes" ; then
+      echo "libiscsi" "Install libiscsi >= 1.9.0"
+    fi
+    libiscsi="no"
+  fi
+fi
+print_config "iscsi engine" "$libiscsi"
+
+##########################################
+# Check if we have libnbd (for NBD support).
+minimum_libnbd=0.9.8
+if test "$libnbd" = "yes" ; then
+  if $(pkg-config --atleast-version=$minimum_libnbd libnbd); then
+    libnbd="yes"
+    libnbd_cflags=$(pkg-config --cflags libnbd)
+    libnbd_libs=$(pkg-config --libs libnbd)
+  else
+    if test "$libnbd" = "yes" ; then
+      echo "libnbd" "Install libnbd >= $minimum_libnbd"
+    fi
+    libnbd="no"
+  fi
+fi
+print_config "NBD engine" "$libnbd"
 
 ##########################################
 # Check if we have lex/yacc available
@@ -1882,7 +2258,7 @@ fi
 fi
 fi
 
-echo "lex/yacc for arithmetic       $arith"
+print_config "lex/yacc for arithmetic" "$arith"
 
 ##########################################
 # Check whether we have setmntent/getmntent
@@ -1903,7 +2279,7 @@ EOF
 if compile_prog "" "" "getmntent"; then
   getmntent="yes"
 fi
-echo "getmntent                     $getmntent"
+print_config "getmntent" "$getmntent"
 
 ##########################################
 # Check whether we have getmntinfo
@@ -1928,7 +2304,7 @@ EOF
 if compile_prog "-Werror" "" "getmntinfo"; then
   getmntinfo="yes"
 fi
-echo "getmntinfo                    $getmntinfo"
+print_config "getmntinfo" "$getmntinfo"
 
 # getmntinfo(3) for NetBSD.
 if test "$getmntinfo_statvfs" != "yes" ; then
@@ -1946,7 +2322,7 @@ EOF
 # Skip the test if the one with statfs arg is detected.
 if test "$getmntinfo" != "yes" && compile_prog "-Werror" "" "getmntinfo_statvfs"; then
   getmntinfo_statvfs="yes"
-  echo "getmntinfo_statvfs            $getmntinfo_statvfs"
+  print_config "getmntinfo_statvfs" "$getmntinfo_statvfs"
 fi
 
 ##########################################
@@ -1972,7 +2348,7 @@ EOF
 if compile_prog "" "" "static_assert"; then
     static_assert="yes"
 fi
-echo "Static Assert                 $static_assert"
+print_config "Static Assert" "$static_assert"
 
 ##########################################
 # Check whether we have bool / stdbool.h
@@ -1990,7 +2366,62 @@ EOF
 if compile_prog "" "" "bool"; then
   have_bool="yes"
 fi
-echo "bool                          $have_bool"
+print_config "bool" "$have_bool"
+
+##########################################
+# Check whether we have strndup()
+strndup="no"
+cat > $TMPC << EOF
+#include <string.h>
+#include <stdlib.h>
+int main(int argc, char **argv)
+{
+  char *res = strndup("test string", 8);
+
+  free(res);
+  return 0;
+}
+EOF
+if compile_prog "" "" "strndup"; then
+  strndup="yes"
+fi
+print_config "strndup" "$strndup"
+
+##########################################
+# <valgrind/drd.h> probe
+# Note: presence of <valgrind/drd.h> implies that <valgrind/valgrind.h> is
+# also available but not the other way around.
+if test "$valgrind_dev" != "yes" ; then
+  valgrind_dev="no"
+fi
+cat > $TMPC << EOF
+#include <valgrind/drd.h>
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "" "" "valgrind_dev"; then
+  valgrind_dev="yes"
+fi
+print_config "Valgrind headers" "$valgrind_dev"
+
+##########################################
+# <linux/blkzoned.h> probe
+if test "$linux_blkzoned" != "yes" ; then
+  linux_blkzoned="no"
+fi
+cat > $TMPC << EOF
+#include <linux/blkzoned.h>
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "" "" "linux_blkzoned"; then
+  linux_blkzoned="yes"
+fi
+print_config "Zoned block device support" "$linux_blkzoned"
 
 ##########################################
 # check march=armv8-a+crc+crypto
@@ -1999,21 +2430,27 @@ if test "$march_armv8_a_crc_crypto" != "yes" ; then
 fi
 if test "$cpu" = "arm64" ; then
   cat > $TMPC <<EOF
-#include <sys/auxv.h>
 #include <arm_acle.h>
 #include <arm_neon.h>
+#include <sys/auxv.h>
 
 int main(void)
 {
-  return 0;
+  /* Can we also do a runtime probe? */
+#if __linux__
+  return getauxval(AT_HWCAP);
+#else
+# error "Don't know how to do runtime probe for ARM CRC32c"
+#endif
 }
 EOF
-  if compile_prog "-march=armv8-a+crc+crypto" "" ""; then
+  if compile_prog "-march=armv8-a+crc+crypto" "" "ARM CRC32c"; then
     march_armv8_a_crc_crypto="yes"
-    CFLAGS="$CFLAGS -march=armv8-a+crc+crypto -DARCH_HAVE_CRC_CRYPTO"
+    CFLAGS="$CFLAGS -march=armv8-a+crc+crypto"
+    march_set="yes"
   fi
 fi
-echo "march_armv8_a_crc_crypto      $march_armv8_a_crc_crypto"
+print_config "march_armv8_a_crc_crypto" "$march_armv8_a_crc_crypto"
 
 ##########################################
 # cuda probe
@@ -2031,7 +2468,159 @@ if test "$enable_cuda" = "yes" && compile_prog "" "-lcuda" "cuda"; then
   cuda="yes"
   LIBS="-lcuda $LIBS"
 fi
-echo "cuda                          $cuda"
+print_config "cuda" "$cuda"
+
+##########################################
+# check for cc -march=native
+build_native="no"
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if test "$disable_native" = "no" && test "$disable_opt" != "yes" && \
+   compile_prog "-march=native" "" "march=native"; then
+  build_native="yes"
+fi
+print_config "Build march=native" "$build_native"
+
+##########################################
+# check for -lcunit
+if test "$cunit" != "yes" ; then
+  cunit="no"
+fi
+cat > $TMPC << EOF
+#include <CUnit/CUnit.h>
+#include <CUnit/Basic.h>
+int main(void)
+{
+  if (CU_initialize_registry() != CUE_SUCCESS)
+    return CU_get_error();
+  CU_basic_set_mode(CU_BRM_VERBOSE);
+  CU_basic_run_tests();
+  CU_cleanup_registry();
+  return CU_get_error();
+}
+EOF
+if compile_prog "" "-lcunit" "CUnit"; then
+  cunit="yes"
+fi
+print_config "CUnit" "$cunit"
+
+##########################################
+# check for __kernel_rwf_t
+__kernel_rwf_t="no"
+cat > $TMPC << EOF
+#include <linux/fs.h>
+int main(int argc, char **argv)
+{
+  __kernel_rwf_t x;
+  x = 0;
+  return x;
+}
+EOF
+if compile_prog "" "" "__kernel_rwf_t"; then
+  __kernel_rwf_t="yes"
+fi
+print_config "__kernel_rwf_t" "$__kernel_rwf_t"
+
+##########################################
+# check if gcc has -Wimplicit-fallthrough
+fallthrough="no"
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "-Wimplicit-fallthrough" "" "-Wimplicit-fallthrough"; then
+  fallthrough="yes"
+fi
+print_config "-Wimplicit-fallthrough" "$fallthrough"
+
+##########################################
+# check for MADV_HUGEPAGE support
+if test "$thp" != "yes" ; then
+  thp="no"
+fi
+if test "$esx" != "yes" ; then
+  cat > $TMPC <<EOF
+#include <sys/mman.h>
+int main(void)
+{
+  return madvise(0, 0x1000, MADV_HUGEPAGE);
+}
+EOF
+  if compile_prog "" "" "thp" ; then
+    thp=yes
+  else
+    if test "$thp" = "yes" ; then
+      feature_not_found "Transparent Huge Page" ""
+    fi
+    thp=no
+  fi
+fi
+print_config "MADV_HUGEPAGE" "$thp"
+
+##########################################
+# check for gettid()
+gettid="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  return gettid();
+}
+EOF
+if compile_prog "" "" "gettid"; then
+  gettid="yes"
+fi
+print_config "gettid" "$gettid"
+
+##########################################
+# check for statx(2) support by libc
+statx="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+#include <sys/stat.h>
+
+int main(int argc, char **argv)
+{
+	struct statx st;
+	return statx(-1, *argv, 0, 0, &st);
+}
+EOF
+if compile_prog "" "" "statx"; then
+  statx="yes"
+fi
+print_config "statx(2)/libc" "$statx"
+
+##########################################
+# check for statx(2) support by kernel
+statx_syscall="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+#include <linux/stat.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+
+static int _statx(int dfd, const char *pathname, int flags, unsigned int mask,
+		  struct statx *buffer)
+{
+	return syscall(__NR_statx, dfd, pathname, flags, mask, buffer);
+}
+
+int main(int argc, char **argv)
+{
+	struct statx st;
+	return _statx(-1, *argv, 0, 0, &st);
+}
+EOF
+if compile_prog "" "" "statx_syscall"; then
+  statx_syscall="yes"
+fi
+print_config "statx(2)/syscall" "$statx_syscall"
 
 #############################################################################
 
@@ -2052,6 +2641,9 @@ if test "$zlib" = "yes" ; then
 fi
 if test "$libaio" = "yes" ; then
   output_sym "CONFIG_LIBAIO"
+  if test "$libaio_uring" = "yes" ; then
+    output_sym "CONFIG_LIBAIO_URING"
+  fi
 fi
 if test "$posix_aio" = "yes" ; then
   output_sym "CONFIG_POSIXAIO"
@@ -2062,6 +2654,18 @@ fi
 if test "$posix_pshared" = "yes" ; then
   output_sym "CONFIG_PSHARED"
 fi
+if test "$pthread_condattr_setclock" = "yes" ; then
+  output_sym "CONFIG_PTHREAD_CONDATTR_SETCLOCK"
+fi
+if test "$pthread_sigmask" = "yes" ; then
+  output_sym "CONFIG_PTHREAD_SIGMASK"
+fi
+if test "$have_asprintf" = "yes" ; then
+    output_sym "CONFIG_HAVE_ASPRINTF"
+fi
+if test "$have_vasprintf" = "yes" ; then
+    output_sym "CONFIG_HAVE_VASPRINTF"
+fi
 if test "$linux_fallocate" = "yes" ; then
   output_sym "CONFIG_LINUX_FALLOCATE"
 fi
@@ -2071,11 +2675,26 @@ fi
 if test "$fdatasync" = "yes" ; then
   output_sym "CONFIG_FDATASYNC"
 fi
+if test "$pipe" = "yes" ; then
+  output_sym "CONFIG_PIPE"
+fi
+if test "$pipe2" = "yes" ; then
+  output_sym "CONFIG_PIPE2"
+fi
+if test "$pread" = "yes" ; then
+  output_sym "CONFIG_PREAD"
+fi
 if test "$sync_file_range" = "yes" ; then
   output_sym "CONFIG_SYNC_FILE_RANGE"
 fi
 if test "$sfaa" = "yes" ; then
   output_sym "CONFIG_SFAA"
+fi
+if test "$sync_sync" = "yes" ; then
+  output_sym "CONFIG_SYNC_SYNC"
+fi
+if test "$cmp_swap" = "yes" ; then
+  output_sym "CONFIG_CMP_SWAP"
 fi
 if test "$libverbs" = "yes" -a "$rdmacm" = "yes" ; then
   output_sym "CONFIG_RDMA"
@@ -2133,9 +2752,6 @@ fi
 if test "$guasi" = "yes" ; then
   output_sym "CONFIG_GUASI"
 fi
-if test "$fusion_aw" = "yes" ; then
-  output_sym "CONFIG_FUSION_AW"
-fi
 if test "$libnuma_v2" = "yes" ; then
   output_sym "CONFIG_LIBNUMA"
 fi
@@ -2179,6 +2795,12 @@ fi
 if test "$ipv6" = "yes" ; then
   output_sym "CONFIG_IPV6"
 fi
+if test "$http" = "yes" ; then
+  output_sym "CONFIG_HTTP"
+fi
+if test "$rados" = "yes" ; then
+  output_sym "CONFIG_RADOS"
+fi
 if test "$rbd" = "yes" ; then
   output_sym "CONFIG_RBD"
 fi
@@ -2188,15 +2810,13 @@ fi
 if test "$rbd_inval" = "yes" ; then
   output_sym "CONFIG_RBD_INVAL"
 fi
-if test "$rbd_blkin" = "yes" ; then
-  output_sym "CONFIG_RBD_BLKIN"
-fi
 if test "$setvbuf" = "yes" ; then
   output_sym "CONFIG_SETVBUF"
 fi
 if test "$s390_z196_facilities" = "yes" ; then
   output_sym "CONFIG_S390_Z196_FACILITIES"
   CFLAGS="$CFLAGS -march=z9-109"
+  march_set="yes"
 fi
 if test "$gfapi" = "yes" ; then
   output_sym "CONFIG_GFAPI"
@@ -2207,13 +2827,16 @@ fi
 if test "$gf_trim" = "yes" ; then
   output_sym "CONFIG_GF_TRIM"
 fi
+if test "$gf_new" = "yes" ; then
+  output_sym "CONFIG_GF_NEW_API"
+fi
 if test "$libhdfs" = "yes" ; then
   output_sym "CONFIG_LIBHDFS"
   echo "FIO_HDFS_CPU=$FIO_HDFS_CPU" >> $config_host_mak
   echo "JAVA_HOME=$JAVA_HOME" >> $config_host_mak
   echo "FIO_LIBHDFS_INCLUDE=$FIO_LIBHDFS_INCLUDE" >> $config_host_mak
   echo "FIO_LIBHDFS_LIB=$FIO_LIBHDFS_LIB" >> $config_host_mak
- fi
+fi
 if test "$gas" = "yes" ; then
   output_sym "CONFIG_GAS"
 fi
@@ -2229,6 +2852,12 @@ if test "$pmemblk" = "yes" ; then
 fi
 if test "$devdax" = "yes" ; then
   output_sym "CONFIG_LINUX_DEVDAX"
+fi
+if test "$pmem" = "yes" ; then
+  output_sym "CONFIG_LIBPMEM"
+fi
+if test "$libime" = "yes" ; then
+  output_sym "CONFIG_IME"
 fi
 if test "$arith" = "yes" ; then
   output_sym "CONFIG_ARITHMETIC"
@@ -2256,15 +2885,79 @@ fi
 if test "$have_bool" = "yes" ; then
   output_sym "CONFIG_HAVE_BOOL"
 fi
+if test "$strndup" = "yes" ; then
+  output_sym "CONFIG_HAVE_STRNDUP"
+fi
 if test "$disable_opt" = "yes" ; then
   output_sym "CONFIG_DISABLE_OPTIMIZATIONS"
 fi
+if test "$valgrind_dev" = "yes"; then
+  output_sym "CONFIG_VALGRIND_DEV"
+fi
+if test "$linux_blkzoned" = "yes" ; then
+  output_sym "CONFIG_LINUX_BLKZONED"
+fi
 if test "$zlib" = "no" ; then
-  echo "Consider installing zlib-dev (zlib-devel), some fio features depend on it."
+  echo "Consider installing zlib-dev (zlib-devel, some fio features depend on it."
+  if test "$build_static" = "yes"; then
+    echo "Note that some distros have separate packages for static libraries."
+  fi
+fi
+if test "$march_armv8_a_crc_crypto" = "yes" ; then
+  output_sym "ARCH_HAVE_CRC_CRYPTO"
 fi
 if test "$cuda" = "yes" ; then
   output_sym "CONFIG_CUDA"
 fi
+if test "$march_set" = "no" && test "$build_native" = "yes" ; then
+  output_sym "CONFIG_BUILD_NATIVE"
+fi
+if test "$cunit" = "yes" ; then
+  output_sym "CONFIG_HAVE_CUNIT"
+fi
+if test "$__kernel_rwf_t" = "yes"; then
+  output_sym "CONFIG_HAVE_KERNEL_RWF_T"
+fi
+if test "$gettid" = "yes"; then
+  output_sym "CONFIG_HAVE_GETTID"
+fi
+if test "$statx" = "yes"; then
+  output_sym "CONFIG_HAVE_STATX"
+fi
+if test "$statx_syscall" = "yes"; then
+  output_sym "CONFIG_HAVE_STATX_SYSCALL"
+fi
+if test "$fallthrough" = "yes"; then
+  CFLAGS="$CFLAGS -Wimplicit-fallthrough"
+fi
+if test "$thp" = "yes" ; then
+  output_sym "CONFIG_HAVE_THP"
+fi
+if test "$libiscsi" = "yes" ; then
+  output_sym "CONFIG_LIBISCSI"
+  echo "CONFIG_LIBISCSI=m" >> $config_host_mak
+  echo "LIBISCSI_CFLAGS=$libiscsi_cflags" >> $config_host_mak
+  echo "LIBISCSI_LIBS=$libiscsi_libs" >> $config_host_mak
+fi
+if test "$libnbd" = "yes" ; then
+  output_sym "CONFIG_LIBNBD"
+  echo "CONFIG_LIBNBD=m" >> $config_host_mak
+  echo "LIBNBD_CFLAGS=$libnbd_cflags" >> $config_host_mak
+  echo "LIBNBD_LIBS=$libnbd_libs" >> $config_host_mak
+fi
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if test "$disable_tcmalloc" != "yes"  && compile_prog "" "-ltcmalloc" "tcmalloc"; then
+  LIBS="-ltcmalloc $LIBS"
+  tcmalloc="yes"
+else
+  tcmalloc="no"
+fi
+print_config "TCMalloc support" "$tcmalloc"
 
 echo "LIBS+=$LIBS" >> $config_host_mak
 echo "GFIO_LIBS+=$GFIO_LIBS" >> $config_host_mak

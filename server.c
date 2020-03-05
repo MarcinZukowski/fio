@@ -1,10 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <unistd.h>
-#include <limits.h>
 #include <errno.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -25,12 +23,12 @@
 #include "server.h"
 #include "crc/crc16.h"
 #include "lib/ieee754.h"
-#include "verify.h"
+#include "verify-state.h"
 #include "smalloc.h"
 
 int fio_net_port = FIO_NET_PORT;
 
-int exit_backend = 0;
+bool exit_backend = false;
 
 enum {
 	SK_F_FREE	= 1,
@@ -74,7 +72,7 @@ struct fio_fork_item {
 };
 
 struct cmd_reply {
-	struct fio_mutex lock;
+	struct fio_sem lock;
 	void *data;
 	size_t size;
 	int error;
@@ -108,12 +106,12 @@ static const char *fio_server_ops[FIO_NET_CMD_NR] = {
 
 static void sk_lock(struct sk_out *sk_out)
 {
-	fio_mutex_down(&sk_out->lock);
+	fio_sem_down(&sk_out->lock);
 }
 
 static void sk_unlock(struct sk_out *sk_out)
 {
-	fio_mutex_up(&sk_out->lock);
+	fio_sem_up(&sk_out->lock);
 }
 
 void sk_out_assign(struct sk_out *sk_out)
@@ -129,9 +127,9 @@ void sk_out_assign(struct sk_out *sk_out)
 
 static void sk_out_free(struct sk_out *sk_out)
 {
-	__fio_mutex_remove(&sk_out->lock);
-	__fio_mutex_remove(&sk_out->wait);
-	__fio_mutex_remove(&sk_out->xmit);
+	__fio_sem_remove(&sk_out->lock);
+	__fio_sem_remove(&sk_out->wait);
+	__fio_sem_remove(&sk_out->xmit);
 	sfree(sk_out);
 }
 
@@ -252,9 +250,10 @@ static int fio_send_data(int sk, const void *p, unsigned int len)
 	return fio_sendv_data(sk, &iov, 1);
 }
 
-static int fio_recv_data(int sk, void *p, unsigned int len, bool wait)
+static int fio_recv_data(int sk, void *buf, unsigned int len, bool wait)
 {
 	int flags;
+	char *p = buf;
 
 	if (wait)
 		flags = MSG_WAITALL;
@@ -297,6 +296,8 @@ static int verify_convert_cmd(struct fio_net_cmd *cmd)
 	if (crc != cmd->cmd_crc16) {
 		log_err("fio: server bad crc on command (got %x, wanted %x)\n",
 				cmd->cmd_crc16, crc);
+		fprintf(f_err, "fio: server bad crc on command (got %x, wanted %x)\n",
+				cmd->cmd_crc16, crc);
 		return 1;
 	}
 
@@ -311,6 +312,8 @@ static int verify_convert_cmd(struct fio_net_cmd *cmd)
 		break;
 	default:
 		log_err("fio: bad server cmd version %d\n", cmd->version);
+		fprintf(f_err, "fio: client/server version mismatch (%d != %d)\n",
+				cmd->version, FIO_SERVER_VER);
 		return 1;
 	}
 
@@ -377,7 +380,7 @@ struct fio_net_cmd *fio_net_recv_cmd(int sk, bool wait)
 			break;
 
 		/* There's payload, get it */
-		pdu = (void *) cmdret->payload + pdu_offset;
+		pdu = (char *) cmdret->payload + pdu_offset;
 		ret = fio_recv_data(sk, pdu, cmd.pdu_len, wait);
 		if (ret)
 			break;
@@ -438,7 +441,7 @@ static uint64_t alloc_reply(uint64_t tag, uint16_t opcode)
 
 	reply = calloc(1, sizeof(*reply));
 	INIT_FLIST_HEAD(&reply->list);
-	fio_gettime(&reply->tv, NULL);
+	fio_gettime(&reply->ts, NULL);
 	reply->saved_tag = tag;
 	reply->opcode = opcode;
 
@@ -527,6 +530,9 @@ static struct sk_entry *fio_net_prep_cmd(uint16_t opcode, void *buf,
 	struct sk_entry *entry;
 
 	entry = smalloc(sizeof(*entry));
+	if (!entry)
+		return NULL;
+
 	INIT_FLIST_HEAD(&entry->next);
 	entry->opcode = opcode;
 	if (flags & SK_F_COPY) {
@@ -557,7 +563,7 @@ static void fio_net_queue_entry(struct sk_entry *entry)
 		flist_add_tail(&entry->list, &sk_out->list);
 		sk_unlock(sk_out);
 
-		fio_mutex_up(&sk_out->wait);
+		fio_sem_up(&sk_out->wait);
 	}
 }
 
@@ -843,24 +849,24 @@ static int handle_jobline_cmd(struct fio_net_cmd *cmd)
 static int handle_probe_cmd(struct fio_net_cmd *cmd)
 {
 	struct cmd_client_probe_pdu *pdu = (struct cmd_client_probe_pdu *) cmd->payload;
-	struct cmd_probe_reply_pdu probe;
 	uint64_t tag = cmd->tag;
+	struct cmd_probe_reply_pdu probe = {
+#ifdef CONFIG_BIG_ENDIAN
+		.bigendian	= 1,
+#endif
+		.os		= FIO_OS,
+		.arch		= FIO_ARCH,
+		.bpp		= sizeof(void *),
+		.cpus		= __cpu_to_le32(cpus_online()),
+	};
 
 	dprint(FD_NET, "server: sending probe reply\n");
 
 	strcpy(me, (char *) pdu->server);
 
-	memset(&probe, 0, sizeof(probe));
 	gethostname((char *) probe.hostname, sizeof(probe.hostname));
-#ifdef CONFIG_BIG_ENDIAN
-	probe.bigendian = 1;
-#endif
-	strncpy((char *) probe.fio_version, fio_version_string, sizeof(probe.fio_version));
-
-	probe.os	= FIO_OS;
-	probe.arch	= FIO_ARCH;
-	probe.bpp	= sizeof(void *);
-	probe.cpus	= __cpu_to_le32(cpus_online());
+	snprintf((char *) probe.fio_version, sizeof(probe.fio_version), "%s",
+		 fio_version_string);
 
 	/*
 	 * If the client supports compression and we do too, then enable it
@@ -950,7 +956,7 @@ static int handle_update_job_cmd(struct fio_net_cmd *cmd)
 	return 0;
 }
 
-static int handle_trigger_cmd(struct fio_net_cmd *cmd)
+static int handle_trigger_cmd(struct fio_net_cmd *cmd, struct flist_head *job_list)
 {
 	struct cmd_vtrigger_pdu *pdu = (struct cmd_vtrigger_pdu *) cmd->payload;
 	char *buf = (char *) pdu->cmd;
@@ -969,6 +975,8 @@ static int handle_trigger_cmd(struct fio_net_cmd *cmd)
 	} else
 		fio_net_queue_cmd(FIO_NET_CMD_VTRIGGER, rep, sz, NULL, SK_F_FREE | SK_F_INLINE);
 
+	fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
+	fio_server_check_jobs(job_list);
 	exec_trigger(buf);
 	return 0;
 }
@@ -984,11 +992,11 @@ static int handle_command(struct sk_out *sk_out, struct flist_head *job_list,
 
 	switch (cmd->opcode) {
 	case FIO_NET_CMD_QUIT:
-		fio_terminate_threads(TERMINATE_ALL);
+		fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 		ret = 0;
 		break;
 	case FIO_NET_CMD_EXIT:
-		exit_backend = 1;
+		exit_backend = true;
 		return -1;
 	case FIO_NET_CMD_LOAD_FILE:
 		ret = handle_load_file_cmd(cmd);
@@ -1012,7 +1020,7 @@ static int handle_command(struct sk_out *sk_out, struct flist_head *job_list,
 		ret = handle_update_job_cmd(cmd);
 		break;
 	case FIO_NET_CMD_VTRIGGER:
-		ret = handle_trigger_cmd(cmd);
+		ret = handle_trigger_cmd(cmd, job_list);
 		break;
 	case FIO_NET_CMD_SENDFILE: {
 		struct cmd_sendfile_reply *in;
@@ -1037,7 +1045,7 @@ static int handle_command(struct sk_out *sk_out, struct flist_head *job_list,
 				memcpy(rep->data, in->data, in->size);
 			}
 		}
-		fio_mutex_up(&rep->lock);
+		fio_sem_up(&rep->lock);
 		break;
 		}
 	default:
@@ -1136,7 +1144,7 @@ static int handle_sk_entry(struct sk_out *sk_out, struct sk_entry *entry)
 {
 	int ret;
 
-	fio_mutex_down(&sk_out->xmit);
+	fio_sem_down(&sk_out->xmit);
 
 	if (entry->flags & SK_F_VEC)
 		ret = send_vec_entry(sk_out, entry);
@@ -1148,7 +1156,7 @@ static int handle_sk_entry(struct sk_out *sk_out, struct sk_entry *entry)
 					entry->size, &entry->tag, NULL);
 	}
 
-	fio_mutex_up(&sk_out->xmit);
+	fio_sem_up(&sk_out->xmit);
 
 	if (ret)
 		log_err("fio: failed handling cmd %s\n", fio_server_op(entry->opcode));
@@ -1196,7 +1204,6 @@ static int handle_connection(struct sk_out *sk_out)
 			.events	= POLLIN,
 		};
 
-		ret = 0;
 		do {
 			int timeout = 1000;
 
@@ -1213,7 +1220,7 @@ static int handle_connection(struct sk_out *sk_out)
 				break;
 			} else if (!ret) {
 				fio_server_check_jobs(&job_list);
-				fio_mutex_down_timeout(&sk_out->wait, timeout);
+				fio_sem_down_timeout(&sk_out->wait, timeout);
 				continue;
 			}
 
@@ -1255,7 +1262,7 @@ static int handle_connection(struct sk_out *sk_out)
 	_exit(ret);
 }
 
-/* get the address on this host bound by the input socket, 
+/* get the address on this host bound by the input socket,
  * whether it is ipv6 or ipv4 */
 
 static int get_my_addr_str(int sk)
@@ -1279,7 +1286,7 @@ static int get_my_addr_str(int sk)
 
 	ret = getsockname(sk, sockaddr_p, &len);
 	if (ret) {
-		log_err("fio: getsockaddr: %s\n", strerror(errno));
+		log_err("fio: getsockname: %s\n", strerror(errno));
 		return -1;
 	}
 
@@ -1356,12 +1363,17 @@ static int accept_loop(int listen_sk)
 
 		dprint(FD_NET, "server: connect from %s\n", from);
 
-		sk_out = smalloc(sizeof(*sk_out));
+		sk_out = scalloc(1, sizeof(*sk_out));
+		if (!sk_out) {
+			close(sk);
+			return -1;
+		}
+
 		sk_out->sk = sk;
 		INIT_FLIST_HEAD(&sk_out->list);
-		__fio_mutex_init(&sk_out->lock, FIO_MUTEX_UNLOCKED);
-		__fio_mutex_init(&sk_out->wait, FIO_MUTEX_LOCKED);
-		__fio_mutex_init(&sk_out->xmit, FIO_MUTEX_UNLOCKED);
+		__fio_sem_init(&sk_out->lock, FIO_SEM_UNLOCKED);
+		__fio_sem_init(&sk_out->wait, FIO_SEM_LOCKED);
+		__fio_sem_init(&sk_out->xmit, FIO_SEM_UNLOCKED);
 
 		pid = fork();
 		if (pid) {
@@ -1441,6 +1453,7 @@ static void convert_gs(struct group_run_stats *dst, struct group_run_stats *src)
 	dst->unit_base	= cpu_to_le32(src->unit_base);
 	dst->groupid	= cpu_to_le32(src->groupid);
 	dst->unified_rw_rep	= cpu_to_le32(src->unified_rw_rep);
+	dst->sig_figs	= cpu_to_le32(src->sig_figs);
 }
 
 /*
@@ -1450,7 +1463,7 @@ static void convert_gs(struct group_run_stats *dst, struct group_run_stats *src)
 void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 {
 	struct cmd_ts_pdu p;
-	int i, j;
+	int i, j, k;
 	void *ss_buf;
 	uint64_t *ss_iops, *ss_bw;
 
@@ -1458,9 +1471,10 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 
 	memset(&p, 0, sizeof(p));
 
-	strncpy(p.ts.name, ts->name, FIO_JOBNAME_SIZE - 1);
-	strncpy(p.ts.verror, ts->verror, FIO_VERROR_SIZE - 1);
-	strncpy(p.ts.description, ts->description, FIO_JOBDESC_SIZE - 1);
+	snprintf(p.ts.name, sizeof(p.ts.name), "%s", ts->name);
+	snprintf(p.ts.verror, sizeof(p.ts.verror), "%s", ts->verror);
+	snprintf(p.ts.description, sizeof(p.ts.description), "%s",
+		 ts->description);
 
 	p.ts.error		= cpu_to_le32(ts->error);
 	p.ts.thread_number	= cpu_to_le32(ts->thread_number);
@@ -1474,14 +1488,18 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 		convert_io_stat(&p.ts.slat_stat[i], &ts->slat_stat[i]);
 		convert_io_stat(&p.ts.lat_stat[i], &ts->lat_stat[i]);
 		convert_io_stat(&p.ts.bw_stat[i], &ts->bw_stat[i]);
+		convert_io_stat(&p.ts.iops_stat[i], &ts->iops_stat[i]);
 	}
+	convert_io_stat(&p.ts.sync_stat, &ts->sync_stat);
 
 	p.ts.usr_time		= cpu_to_le64(ts->usr_time);
 	p.ts.sys_time		= cpu_to_le64(ts->sys_time);
 	p.ts.ctx		= cpu_to_le64(ts->ctx);
 	p.ts.minf		= cpu_to_le64(ts->minf);
 	p.ts.majf		= cpu_to_le64(ts->majf);
-	p.ts.clat_percentiles	= cpu_to_le64(ts->clat_percentiles);
+	p.ts.clat_percentiles	= cpu_to_le32(ts->clat_percentiles);
+	p.ts.lat_percentiles	= cpu_to_le32(ts->lat_percentiles);
+	p.ts.slat_percentiles	= cpu_to_le32(ts->slat_percentiles);
 	p.ts.percentile_precision = cpu_to_le64(ts->percentile_precision);
 
 	for (i = 0; i < FIO_IO_U_LIST_MAX_LEN; i++) {
@@ -1492,28 +1510,37 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	}
 
 	for (i = 0; i < FIO_IO_U_MAP_NR; i++) {
-		p.ts.io_u_map[i]	= cpu_to_le32(ts->io_u_map[i]);
-		p.ts.io_u_submit[i]	= cpu_to_le32(ts->io_u_submit[i]);
-		p.ts.io_u_complete[i]	= cpu_to_le32(ts->io_u_complete[i]);
+		p.ts.io_u_map[i]	= cpu_to_le64(ts->io_u_map[i]);
+		p.ts.io_u_submit[i]	= cpu_to_le64(ts->io_u_submit[i]);
+		p.ts.io_u_complete[i]	= cpu_to_le64(ts->io_u_complete[i]);
 	}
 
+	for (i = 0; i < FIO_IO_U_LAT_N_NR; i++)
+		p.ts.io_u_lat_n[i]	= cpu_to_le64(ts->io_u_lat_n[i]);
 	for (i = 0; i < FIO_IO_U_LAT_U_NR; i++)
-		p.ts.io_u_lat_u[i]	= cpu_to_le32(ts->io_u_lat_u[i]);
+		p.ts.io_u_lat_u[i]	= cpu_to_le64(ts->io_u_lat_u[i]);
 	for (i = 0; i < FIO_IO_U_LAT_M_NR; i++)
-		p.ts.io_u_lat_m[i]	= cpu_to_le32(ts->io_u_lat_m[i]);
+		p.ts.io_u_lat_m[i]	= cpu_to_le64(ts->io_u_lat_m[i]);
 
-	for (i = 0; i < DDIR_RWDIR_CNT; i++)
-		for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
-			p.ts.io_u_plat[i][j] = cpu_to_le32(ts->io_u_plat[i][j]);
+	for (i = 0; i < FIO_LAT_CNT; i++)
+		for (j = 0; j < DDIR_RWDIR_CNT; j++)
+			for (k = 0; k < FIO_IO_U_PLAT_NR; k++)
+				p.ts.io_u_plat[i][j][k] = cpu_to_le64(ts->io_u_plat[i][j][k]);
+
+	for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
+		p.ts.io_u_sync_plat[j] = cpu_to_le64(ts->io_u_sync_plat[j]);
+
+	for (i = 0; i < DDIR_RWDIR_SYNC_CNT; i++)
+		p.ts.total_io_u[i]	= cpu_to_le64(ts->total_io_u[i]);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
-		p.ts.total_io_u[i]	= cpu_to_le64(ts->total_io_u[i]);
 		p.ts.short_io_u[i]	= cpu_to_le64(ts->short_io_u[i]);
 		p.ts.drop_io_u[i]	= cpu_to_le64(ts->drop_io_u[i]);
 	}
 
 	p.ts.total_submit	= cpu_to_le64(ts->total_submit);
 	p.ts.total_complete	= cpu_to_le64(ts->total_complete);
+	p.ts.nr_zone_resets	= cpu_to_le64(ts->nr_zone_resets);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		p.ts.io_bytes[i]	= cpu_to_le64(ts->io_bytes[i]);
@@ -1532,6 +1559,8 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.latency_window	= cpu_to_le64(ts->latency_window);
 	p.ts.latency_percentile.u.i = cpu_to_le64(fio_double_to_uint64(ts->latency_percentile.u.f));
 
+	p.ts.sig_figs		= cpu_to_le32(ts->sig_figs);
+
 	p.ts.nr_block_infos	= cpu_to_le64(ts->nr_block_infos);
 	for (i = 0; i < p.ts.nr_block_infos; i++)
 		p.ts.block_infos[i] = cpu_to_le32(ts->block_infos[i]);
@@ -1544,10 +1573,22 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.ss_deviation.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_deviation.u.f));
 	p.ts.ss_criterion.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_criterion.u.f));
 
+	p.ts.cachehit		= cpu_to_le64(ts->cachehit);
+	p.ts.cachemiss		= cpu_to_le64(ts->cachemiss);
+
+	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
+		for (j = 0; j < FIO_IO_U_PLAT_NR; j++) {
+			p.ts.io_u_plat_high_prio[i][j] = cpu_to_le64(ts->io_u_plat_high_prio[i][j]);
+			p.ts.io_u_plat_low_prio[i][j] = cpu_to_le64(ts->io_u_plat_low_prio[i][j]);
+		}
+		convert_io_stat(&p.ts.clat_high_prio_stat[i], &ts->clat_high_prio_stat[i]);
+		convert_io_stat(&p.ts.clat_low_prio_stat[i], &ts->clat_low_prio_stat[i]);
+	}
+
 	convert_gs(&p.rs, rs);
 
 	dprint(FD_NET, "ts->ss_state = %d\n", ts->ss_state);
-	if (ts->ss_state & __FIO_SS_DATA) {
+	if (ts->ss_state & FIO_SS_DATA) {
 		dprint(FD_NET, "server sending steadystate ring buffers\n");
 
 		ss_buf = malloc(sizeof(p) + 2*ts->ss_dur*sizeof(uint64_t));
@@ -1580,7 +1621,7 @@ void fio_server_send_gs(struct group_run_stats *rs)
 }
 
 void fio_server_send_job_options(struct flist_head *opt_list,
-				 unsigned int groupid)
+				 unsigned int gid)
 {
 	struct cmd_job_option pdu;
 	struct flist_head *entry;
@@ -1595,12 +1636,12 @@ void fio_server_send_job_options(struct flist_head *opt_list,
 		p = flist_entry(entry, struct print_option, list);
 		memset(&pdu, 0, sizeof(pdu));
 
-		if (groupid == -1U) {
+		if (gid == -1U) {
 			pdu.global = __cpu_to_le16(1);
 			pdu.groupid = 0;
 		} else {
 			pdu.global = 0;
-			pdu.groupid = cpu_to_le32(groupid);
+			pdu.groupid = cpu_to_le32(gid);
 		}
 		len = strlen(p->name);
 		if (len >= sizeof(pdu.name)) {
@@ -1641,8 +1682,7 @@ static void convert_dus(struct disk_util_stat *dst, struct disk_util_stat *src)
 {
 	int i;
 
-	dst->name[FIO_DU_NAME_SZ - 1] = '\0';
-	strncpy((char *) dst->name, (char *) src->name, FIO_DU_NAME_SZ - 1);
+	snprintf((char *) dst->name, sizeof(dst->name), "%s", src->name);
 
 	for (i = 0; i < 2; i++) {
 		dst->s.ios[i]		= cpu_to_le64(src->s.ios[i]);
@@ -1686,8 +1726,8 @@ static inline void __fio_net_prep_tail(z_stream *stream, void *out_pdu,
 
 	*last_entry = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, out_pdu, this_len,
 				 NULL, SK_F_VEC | SK_F_INLINE | SK_F_FREE);
-	flist_add_tail(&(*last_entry)->list, &first->next);
-
+	if (*last_entry)
+		flist_add_tail(&(*last_entry)->list, &first->next);
 }
 
 /*
@@ -1703,9 +1743,10 @@ static int __deflate_pdu_buffer(void *next_in, unsigned int next_sz, void **out_
 	stream->next_in = next_in;
 	stream->avail_in = next_sz;
 	do {
-		if (! stream->avail_out) {
-
+		if (!stream->avail_out) {
 			__fio_net_prep_tail(stream, *out_pdu, last_entry, first);
+			if (*last_entry == NULL)
+				return 1;
 
 			*out_pdu = malloc(FIO_SERVER_MAX_FRAGMENT_PDU);
 
@@ -1739,7 +1780,7 @@ static int __fio_append_iolog_gz_hist(struct sk_entry *first, struct io_log *log
 	for (i = 0; i < cur_log->nr_samples; i++) {
 		struct io_sample *s;
 		struct io_u_plat_entry *cur_plat_entry, *prev_plat_entry;
-		unsigned int *cur_plat, *prev_plat;
+		uint64_t *cur_plat, *prev_plat;
 
 		s = get_sample(log, cur_log, i);
 		ret = __deflate_pdu_buffer(s, sample_sz, &out_pdu, &entry, stream, first);
@@ -1769,8 +1810,7 @@ static int __fio_append_iolog_gz_hist(struct sk_entry *first, struct io_log *log
 	}
 
 	__fio_net_prep_tail(stream, out_pdu, &entry, first);
-
-	return 0;
+	return entry == NULL;
 }
 
 static int __fio_append_iolog_gz(struct sk_entry *first, struct io_log *log,
@@ -1809,6 +1849,10 @@ static int __fio_append_iolog_gz(struct sk_entry *first, struct io_log *log,
 
 		entry = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, out_pdu, this_len,
 					 NULL, SK_F_VEC | SK_F_INLINE | SK_F_FREE);
+		if (!entry) {
+			free(out_pdu);
+			return 1;
+		}
 		flist_add_tail(&entry->list, &first->next);
 	} while (stream->avail_in);
 
@@ -1817,13 +1861,12 @@ static int __fio_append_iolog_gz(struct sk_entry *first, struct io_log *log,
 
 static int fio_append_iolog_gz(struct sk_entry *first, struct io_log *log)
 {
+	z_stream stream = {
+		.zalloc	= Z_NULL,
+		.zfree	= Z_NULL,
+		.opaque	= Z_NULL,
+	};
 	int ret = 0;
-	z_stream stream;
-
-	memset(&stream, 0, sizeof(stream));
-	stream.zalloc = Z_NULL;
-	stream.zfree = Z_NULL;
-	stream.opaque = Z_NULL;
 
 	if (deflateInit(&stream, Z_DEFAULT_COMPRESSION) != Z_OK)
 		return 1;
@@ -1861,6 +1904,10 @@ static int fio_append_iolog_gz(struct sk_entry *first, struct io_log *log)
 
 		entry = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, out_pdu, this_len,
 					 NULL, SK_F_VEC | SK_F_INLINE | SK_F_FREE);
+		if (!entry) {
+			free(out_pdu);
+			break;
+		}
 		flist_add_tail(&entry->list, &first->next);
 	} while (ret != Z_STREAM_END);
 
@@ -1881,6 +1928,7 @@ static int fio_append_gz_chunks(struct sk_entry *first, struct io_log *log)
 {
 	struct sk_entry *entry;
 	struct flist_head *node;
+	int ret = 0;
 
 	pthread_mutex_lock(&log->chunk_lock);
 	flist_for_each(node, &log->chunk_list) {
@@ -1889,16 +1937,20 @@ static int fio_append_gz_chunks(struct sk_entry *first, struct io_log *log)
 		c = flist_entry(node, struct iolog_compress, list);
 		entry = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, c->buf, c->len,
 						NULL, SK_F_VEC | SK_F_INLINE);
+		if (!entry) {
+			ret = 1;
+			break;
+		}
 		flist_add_tail(&entry->list, &first->next);
 	}
 	pthread_mutex_unlock(&log->chunk_lock);
-
-	return 0;
+	return ret;
 }
 
 static int fio_append_text_log(struct sk_entry *first, struct io_log *log)
 {
 	struct sk_entry *entry;
+	int ret = 0;
 
 	while (!flist_empty(&log->io_logs)) {
 		struct io_logs *cur_log;
@@ -1911,23 +1963,27 @@ static int fio_append_text_log(struct sk_entry *first, struct io_log *log)
 
 		entry = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, cur_log->log, size,
 						NULL, SK_F_VEC | SK_F_INLINE);
+		if (!entry) {
+			ret = 1;
+			break;
+		}
 		flist_add_tail(&entry->list, &first->next);
 	}
 
-	return 0;
+	return ret;
 }
 
 int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 {
-	struct cmd_iolog_pdu pdu;
+	struct cmd_iolog_pdu pdu = {
+		.nr_samples		= cpu_to_le64(iolog_nr_samples(log)),
+		.thread_number		= cpu_to_le32(td->thread_number),
+		.log_type		= cpu_to_le32(log->log_type),
+		.log_hist_coarseness	= cpu_to_le32(log->hist_coarseness),
+	};
 	struct sk_entry *first;
 	struct flist_head *entry;
 	int ret = 0;
-
-	pdu.nr_samples = cpu_to_le64(iolog_nr_samples(log));
-	pdu.thread_number = cpu_to_le32(td->thread_number);
-	pdu.log_type = cpu_to_le32(log->log_type);
-	pdu.log_hist_coarseness = cpu_to_le32(log->hist_coarseness);
 
 	if (!flist_empty(&log->chunk_list))
 		pdu.compressed = __cpu_to_le32(STORE_COMPRESSED);
@@ -1936,8 +1992,7 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 	else
 		pdu.compressed = 0;
 
-	strncpy((char *) pdu.name, name, FIO_NET_NAME_MAX);
-	pdu.name[FIO_NET_NAME_MAX - 1] = '\0';
+	snprintf((char *) pdu.name, sizeof(pdu.name), "%s", name);
 
 	/*
 	 * We can't do this for a pre-compressed log, but for that case,
@@ -1954,8 +2009,8 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 
 			s->time		= cpu_to_le64(s->time);
 			s->data.val	= cpu_to_le64(s->data.val);
-			s->__ddir	= cpu_to_le32(s->__ddir);
-			s->bs		= cpu_to_le32(s->bs);
+			s->__ddir	= __cpu_to_le32(s->__ddir);
+			s->bs		= cpu_to_le64(s->bs);
 
 			if (log->log_offset) {
 				struct io_sample_offset *so = (void *) s;
@@ -1969,6 +2024,8 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 	 * Assemble header entry first
 	 */
 	first = fio_net_prep_cmd(FIO_NET_CMD_IOLOG, &pdu, sizeof(pdu), NULL, SK_F_VEC | SK_F_INLINE | SK_F_COPY);
+	if (!first)
+		return 1;
 
 	/*
 	 * Now append actual log entries. If log compression was enabled on
@@ -1989,11 +2046,11 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 
 void fio_server_send_add_job(struct thread_data *td)
 {
-	struct cmd_add_job_pdu pdu;
+	struct cmd_add_job_pdu pdu = {
+		.thread_number = cpu_to_le32(td->thread_number),
+		.groupid = cpu_to_le32(td->groupid),
+	};
 
-	memset(&pdu, 0, sizeof(pdu));
-	pdu.thread_number = cpu_to_le32(td->thread_number);
-	pdu.groupid = cpu_to_le32(td->groupid);
 	convert_thread_options_to_net(&pdu.top, &td->o);
 
 	fio_net_queue_cmd(FIO_NET_CMD_ADD_JOB, &pdu, sizeof(pdu), NULL,
@@ -2025,7 +2082,7 @@ int fio_server_get_verify_state(const char *name, int threadnumber,
 	if (!rep)
 		return ENOMEM;
 
-	__fio_mutex_init(&rep->lock, FIO_MUTEX_LOCKED);
+	__fio_sem_init(&rep->lock, FIO_SEM_LOCKED);
 	rep->data = NULL;
 	rep->error = 0;
 
@@ -2038,7 +2095,7 @@ int fio_server_get_verify_state(const char *name, int threadnumber,
 	/*
 	 * Wait for the backend to receive the reply
 	 */
-	if (fio_mutex_down_timeout(&rep->lock, 10000)) {
+	if (fio_sem_down_timeout(&rep->lock, 10000)) {
 		log_err("fio: timed out waiting for reply\n");
 		ret = ETIMEDOUT;
 		goto fail;
@@ -2075,7 +2132,7 @@ fail:
 	*datap = data;
 
 	sfree(rep->data);
-	__fio_mutex_remove(&rep->lock);
+	__fio_sem_remove(&rep->lock);
 	sfree(rep);
 	return ret;
 }
@@ -2108,18 +2165,19 @@ static int fio_init_server_ip(void)
 	/*
 	 * Not fatal if fails, so just ignore it if that happens
 	 */
-	setsockopt(sk, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+	if (setsockopt(sk, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
+	}
 #endif
 
 	if (use_ipv6) {
-		const void *src = &saddr_in6.sin6_addr;
+		void *src = &saddr_in6.sin6_addr;
 
 		addr = (struct sockaddr *) &saddr_in6;
 		socklen = sizeof(saddr_in6);
 		saddr_in6.sin6_family = AF_INET6;
 		str = inet_ntop(AF_INET6, src, buf, sizeof(buf));
 	} else {
-		const void *src = &saddr_in.sin_addr;
+		void *src = &saddr_in.sin_addr;
 
 		addr = (struct sockaddr *) &saddr_in;
 		socklen = sizeof(saddr_in);
@@ -2152,9 +2210,8 @@ static int fio_init_server_sock(void)
 
 	mode = umask(000);
 
-	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, bind_sock, sizeof(addr.sun_path) - 1);
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", bind_sock);
 
 	len = sizeof(addr.sun_family) + strlen(bind_sock) + 1;
 
@@ -2187,7 +2244,7 @@ static int fio_init_server_connection(void)
 
 	if (!bind_sock) {
 		char *p, port[16];
-		const void *src;
+		void *src;
 		int af;
 
 		if (use_ipv6) {
@@ -2204,9 +2261,9 @@ static int fio_init_server_connection(void)
 		if (p)
 			strcat(p, port);
 		else
-			strncpy(bind_str, port, sizeof(bind_str) - 1);
+			snprintf(bind_str, sizeof(bind_str), "%s", port);
 	} else
-		strncpy(bind_str, bind_sock, sizeof(bind_str) - 1);
+		snprintf(bind_str, sizeof(bind_str), "%s", bind_sock);
 
 	log_info("fio: server listening on %s\n", bind_str);
 
@@ -2231,11 +2288,10 @@ int fio_server_parse_host(const char *host, int ipv6, struct in_addr *inp,
 		ret = inet_pton(AF_INET, host, inp);
 
 	if (ret != 1) {
-		struct addrinfo hints, *res;
-
-		memset(&hints, 0, sizeof(hints));
-		hints.ai_family = ipv6 ? AF_INET6 : AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
+		struct addrinfo *res, hints = {
+			.ai_family = ipv6 ? AF_INET6 : AF_INET,
+			.ai_socktype = SOCK_STREAM,
+		};
 
 		ret = getaddrinfo(host, NULL, &hints, &res);
 		if (ret) {
@@ -2268,7 +2324,7 @@ int fio_server_parse_host(const char *host, int ipv6, struct in_addr *inp,
  * For local domain sockets:
  *	*ptr is the filename, *is_sock is 1.
  */
-int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
+int fio_server_parse_string(const char *str, char **ptr, bool *is_sock,
 			    int *port, struct in_addr *inp,
 			    struct in6_addr *inp6, int *ipv6)
 {
@@ -2277,13 +2333,13 @@ int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
 	int lport = 0;
 
 	*ptr = NULL;
-	*is_sock = 0;
+	*is_sock = false;
 	*port = fio_net_port;
 	*ipv6 = 0;
 
 	if (!strncmp(str, "sock:", 5)) {
 		*ptr = strdup(str + 5);
-		*is_sock = 1;
+		*is_sock = true;
 
 		return 0;
 	}
@@ -2362,7 +2418,8 @@ int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
 static int fio_handle_server_arg(void)
 {
 	int port = fio_net_port;
-	int is_sock, ret = 0;
+	bool is_sock;
+	int ret = 0;
 
 	saddr_in.sin_addr.s_addr = htonl(INADDR_ANY);
 
@@ -2393,11 +2450,11 @@ static void sig_int(int sig)
 
 static void set_sig_handlers(void)
 {
-	struct sigaction act;
+	struct sigaction act = {
+		.sa_handler = sig_int,
+		.sa_flags = SA_RESTART,
+	};
 
-	memset(&act, 0, sizeof(act));
-	act.sa_handler = sig_int;
-	act.sa_flags = SA_RESTART;
 	sigaction(SIGINT, &act, NULL);
 }
 
@@ -2456,7 +2513,7 @@ void fio_server_got_signal(int signal)
 		sk_out->sk = -1;
 	else {
 		log_info("\nfio: terminating on signal %d\n", signal);
-		exit_backend = 1;
+		exit_backend = true;
 	}
 }
 
@@ -2538,7 +2595,7 @@ int fio_start_server(char *pidfile)
 
 	setsid();
 	openlog("fio", LOG_NDELAY|LOG_NOWAIT|LOG_PID, LOG_USER);
-	log_syslog = 1;
+	log_syslog = true;
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);

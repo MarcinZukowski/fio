@@ -4,19 +4,18 @@ endif
 
 VPATH := $(SRCDIR)
 
-ifneq ($(wildcard config-host.mak),)
-all:
-include config-host.mak
-config-host-mak: configure
-	@echo $@ is out-of-date, running configure
-	@sed -n "/.*Configured with/s/[^:]*: //p" $@ | sh
-else
-config-host.mak:
+all: fio
+
+config-host.mak: configure
+	@if [ ! -e "$@" ]; then					\
+	  echo "Running configure ...";				\
+	  ./configure;						\
+	else							\
+	  echo "$@ is out-of-date, running configure";		\
+	  sed -n "/.*Configured with/s/[^:]*: //p" "$@" | sh;	\
+	fi
+
 ifneq ($(MAKECMDGOALS),clean)
-	@echo "Running configure for you..."
-	@./configure
-endif
-all:
 include config-host.mak
 endif
 
@@ -26,12 +25,15 @@ OPTFLAGS= -g -ffast-math
 CFLAGS	= -std=gnu99 -Wwrite-strings -Wall -Wdeclaration-after-statement $(OPTFLAGS) $(EXTFLAGS) $(BUILD_CFLAGS) -I. -I$(SRCDIR)
 LIBS	+= -lm $(EXTLIBS)
 PROGS	= fio
-SCRIPTS = $(addprefix $(SRCDIR)/,tools/fio_generate_plots tools/plot/fio2gnuplot tools/genfio tools/fiologparser.py tools/hist/fiologparser_hist.py)
+SCRIPTS = $(addprefix $(SRCDIR)/,tools/fio_generate_plots tools/plot/fio2gnuplot tools/genfio tools/fiologparser.py tools/hist/fiologparser_hist.py tools/fio_jsonplus_clat2csv)
 
 ifndef CONFIG_FIO_NO_OPT
   CFLAGS += -O3 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 else
   CFLAGS += -O0 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+endif
+ifdef CONFIG_BUILD_NATIVE
+  CFLAGS += -march=native
 endif
 
 ifdef CONFIG_GFIO
@@ -40,25 +42,26 @@ endif
 
 CXXFLAGS = -std=c++11 -fpermissive $(OPTFLAGS)  -I. -I$(SRCDIR) $(CFLAGS)
 
-SOURCE :=	$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
-		$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/lib/*.c)) \
+SOURCE :=	$(sort $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
+		$(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/lib/*.c))) \
 		gettime.c ioengines.c init.c stat.c log.c time.c filesetup.c \
-		eta.c verify.c memory.c io_u.c parse.c mutex.c options.c \
+		eta.c verify.c memory.c io_u.c parse.c fio_sem.c rwlock.c \
+		pshared.c options.c \
 		smalloc.c filehash.c profile.c debug.c engines/cpu.c \
 		engines/mmap.c engines/sync.c engines/null.c engines/net.c \
-		engines/ftruncate.c \
+		engines/ftruncate.c engines/filecreate.c engines/filestat.c \
 		server.c client.c iolog.c backend.c libfio.c flow.c cconv.c \
 		gettime-thread.c helpers.c json.c idletime.c td_error.c \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
 		workqueue.c rate-submit.c optgroup.c helper_thread.c \
-		steadystate.c
+		steadystate.c zone-dist.c
 
 # List of compiled C++ files
 CPP_SOURCE := 
 
 ifdef CONFIG_LIBHDFS
   HDFSFLAGS= -I $(JAVA_HOME)/include -I $(JAVA_HOME)/include/linux -I $(FIO_LIBHDFS_INCLUDE)
-  HDFSLIB= -Wl,-rpath $(JAVA_HOME)/jre/lib/$(FIO_HDFS_CPU)/server -L$(JAVA_HOME)/jre/lib/$(FIO_HDFS_CPU)/server -ljvm $(FIO_LIBHDFS_LIB)/libhdfs.a
+  HDFSLIB= -Wl,-rpath $(JAVA_HOME)/jre/lib/$(FIO_HDFS_CPU)/server -L$(JAVA_HOME)/jre/lib/$(FIO_HDFS_CPU)/server $(FIO_LIBHDFS_LIB)/libhdfs.a -ljvm
   CFLAGS += $(HDFSFLAGS)
   SOURCE += engines/libhdfs.c
 endif
@@ -84,9 +87,18 @@ else
 	LINK=$(CXX)
 endif
 
-ifdef CONFIG_64BIT_LLP64
-  CFLAGS += -DBITS_PER_LONG=32
+ifdef CONFIG_LIBISCSI
+  CFLAGS += $(LIBISCSI_CFLAGS)
+  LIBS += $(LIBISCSI_LIBS)
+  SOURCE += engines/libiscsi.c
 endif
+
+ifdef CONFIG_LIBNBD
+  CFLAGS += $(LIBNBD_CFLAGS)
+  LIBS += $(LIBNBD_LIBS)
+  SOURCE += engines/nbd.c
+endif
+
 ifdef CONFIG_64BIT
   CFLAGS += -DBITS_PER_LONG=64
 endif
@@ -114,18 +126,22 @@ endif
 ifdef CONFIG_GUASI
   SOURCE += engines/guasi.c
 endif
-ifdef CONFIG_FUSION_AW
-  SOURCE += engines/fusion-aw.c
-endif
 ifdef CONFIG_SOLARISAIO
   SOURCE += engines/solarisaio.c
 endif
 ifdef CONFIG_WINDOWSAIO
   SOURCE += engines/windowsaio.c
 endif
+ifdef CONFIG_RADOS
+  SOURCE += engines/rados.c
+endif
 ifdef CONFIG_RBD
   SOURCE += engines/rbd.c
 endif
+ifdef CONFIG_HTTP
+  SOURCE += engines/http.c
+endif
+SOURCE += oslib/asprintf.c
 ifndef CONFIG_STRSEP
   SOURCE += oslib/strsep.c
 endif
@@ -135,11 +151,17 @@ endif
 ifndef CONFIG_STRLCAT
   SOURCE += oslib/strlcat.c
 endif
+ifndef CONFIG_HAVE_STRNDUP
+  SOURCE += oslib/strndup.c
+endif
 ifndef CONFIG_GETOPT_LONG_ONLY
   SOURCE += oslib/getopt_long.c
 endif
 ifndef CONFIG_INET_ATON
   SOURCE += oslib/inet_aton.c
+endif
+ifndef CONFIG_HAVE_STATX
+  SOURCE += oslib/statx.c
 endif
 ifdef CONFIG_GFAPI
   SOURCE += engines/glusterfs.c
@@ -160,17 +182,26 @@ endif
 ifdef CONFIG_LINUX_DEVDAX
   SOURCE += engines/dev-dax.c
 endif
+ifdef CONFIG_LIBPMEM
+  SOURCE += engines/libpmem.c
+endif
+ifdef CONFIG_IME
+  SOURCE += engines/ime.c
+endif
+ifdef CONFIG_LINUX_BLKZONED
+  SOURCE += zbd.c
+endif
 
 ifeq ($(CONFIG_TARGET_OS), Linux)
   SOURCE += diskutil.c fifo.c blktrace.c cgroup.c trim.c engines/sg.c \
-		engines/binject.c oslib/linux-dev-lookup.c
+		oslib/linux-dev-lookup.c engines/io_uring.c
   LIBS += -lpthread -ldl
   LDFLAGS += -rdynamic
 endif
 ifeq ($(CONFIG_TARGET_OS), Android)
   SOURCE += diskutil.c fifo.c blktrace.c cgroup.c trim.c profiles/tiobench.c \
 		oslib/linux-dev-lookup.c
-  LIBS += -ldl
+  LIBS += -ldl -llog
   LDFLAGS += -rdynamic
 endif
 ifeq ($(CONFIG_TARGET_OS), SunOS)
@@ -208,9 +239,10 @@ ifeq ($(CONFIG_TARGET_OS), Darwin)
   LIBS	 += -lpthread -ldl
 endif
 ifneq (,$(findstring CYGWIN,$(CONFIG_TARGET_OS)))
-  SOURCE += os/windows/posix.c
-  LIBS	 += -lpthread -lpsapi -lws2_32
-  CFLAGS += -DPSAPI_VERSION=1 -Ios/windows/posix/include -Wno-format -static
+  SOURCE += os/windows/cpu-affinity.c os/windows/posix.c
+  WINDOWS_OBJS = os/windows/cpu-affinity.o os/windows/posix.o lib/hweight.o
+  LIBS	 += -lpthread -lpsapi -lws2_32 -lssp
+  CFLAGS += -DPSAPI_VERSION=1 -Ios/windows/posix/include -Wno-format
 endif
 
 OBJS := $(SOURCE:.c=.o) $(CPP_SOURCE:.cpp=.o)
@@ -228,7 +260,8 @@ endif
 -include $(OBJS:.o=.d)
 
 T_SMALLOC_OBJS = t/stest.o
-T_SMALLOC_OBJS += gettime.o mutex.o smalloc.o t/log.o t/debug.o t/arch.o
+T_SMALLOC_OBJS += gettime.o fio_sem.o pshared.o smalloc.o t/log.o t/debug.o \
+		  t/arch.o
 T_SMALLOC_PROGS = t/stest
 
 T_IEEE_OBJS = t/ieee754.o
@@ -237,7 +270,8 @@ T_IEEE_PROGS = t/ieee754
 
 T_ZIPF_OBS = t/genzipf.o
 T_ZIPF_OBJS += t/log.o lib/ieee754.o lib/rand.o lib/pattern.o lib/zipf.o \
-		lib/strntol.o lib/gauss.o t/genzipf.o oslib/strcasestr.o
+		lib/strntol.o lib/gauss.o t/genzipf.o oslib/strcasestr.o \
+		oslib/strndup.o
 T_ZIPF_PROGS = t/fio-genzipf
 
 T_AXMAP_OBJS = t/axmap.o
@@ -245,12 +279,13 @@ T_AXMAP_OBJS += lib/lfsr.o lib/axmap.o
 T_AXMAP_PROGS = t/axmap
 
 T_LFSR_TEST_OBJS = t/lfsr-test.o
-T_LFSR_TEST_OBJS += lib/lfsr.o gettime.o t/log.o t/debug.o t/arch.o
+T_LFSR_TEST_OBJS += lib/lfsr.o gettime.o fio_sem.o pshared.o \
+		    t/log.o t/debug.o t/arch.o
 T_LFSR_TEST_PROGS = t/lfsr-test
 
 T_GEN_RAND_OBJS = t/gen-rand.o
 T_GEN_RAND_OBJS += t/log.o t/debug.o lib/rand.o lib/pattern.o lib/strntol.o \
-			oslib/strcasestr.o
+			oslib/strcasestr.o oslib/strndup.o
 T_GEN_RAND_PROGS = t/gen-rand
 
 ifeq ($(CONFIG_TARGET_OS), Linux)
@@ -260,9 +295,10 @@ T_BTRACE_FIO_PROGS = t/fio-btrace2fio
 endif
 
 T_DEDUPE_OBJS = t/dedupe.o
-T_DEDUPE_OBJS += lib/rbtree.o t/log.o mutex.o smalloc.o gettime.o crc/md5.o \
-		lib/memalign.o lib/bloom.o t/debug.o crc/xxhash.o t/arch.o \
-		crc/murmur3.o crc/crc32c.o crc/crc32c-intel.o crc/crc32c-arm64.o crc/fnv.o
+T_DEDUPE_OBJS += lib/rbtree.o t/log.o fio_sem.o pshared.o smalloc.o gettime.o \
+		crc/md5.o lib/memalign.o lib/bloom.o t/debug.o crc/xxhash.o \
+		t/arch.o crc/murmur3.o crc/crc32c.o crc/crc32c-intel.o \
+		crc/crc32c-arm64.o crc/fnv.o
 T_DEDUPE_PROGS = t/fio-dedupe
 
 T_VS_OBJS = t/verify-state.o t/log.o crc/crc32c.o crc/crc32c-intel.o crc/crc32c-arm64.o t/debug.o
@@ -271,8 +307,14 @@ T_VS_PROGS = t/fio-verify-state
 T_PIPE_ASYNC_OBJS = t/read-to-pipe-async.o
 T_PIPE_ASYNC_PROGS = t/read-to-pipe-async
 
+T_IOU_RING_OBJS = t/io_uring.o
+T_IOU_RING_PROGS = t/io_uring
+
 T_MEMLOCK_OBJS = t/memlock.o
 T_MEMLOCK_PROGS = t/memlock
+
+T_TT_OBJS = t/time-test.o
+T_TT_PROGS = t/time-test
 
 T_OBJS = $(T_SMALLOC_OBJS)
 T_OBJS += $(T_IEEE_OBJS)
@@ -285,11 +327,13 @@ T_OBJS += $(T_DEDUPE_OBJS)
 T_OBJS += $(T_VS_OBJS)
 T_OBJS += $(T_PIPE_ASYNC_OBJS)
 T_OBJS += $(T_MEMLOCK_OBJS)
+T_OBJS += $(T_TT_OBJS)
+T_OBJS += $(T_IOU_RING_OBJS)
 
 ifneq (,$(findstring CYGWIN,$(CONFIG_TARGET_OS)))
-    T_DEDUPE_OBJS += os/windows/posix.o lib/hweight.o
-    T_SMALLOC_OBJS += os/windows/posix.o lib/hweight.o
-    T_LFSR_TEST_OBJS += os/windows/posix.o lib/hweight.o
+    T_DEDUPE_OBJS += $(WINDOWS_OBJS)
+    T_SMALLOC_OBJS += $(WINDOWS_OBJS)
+    T_LFSR_TEST_OBJS += $(WINDOWS_OBJS)
 endif
 
 T_TEST_PROGS = $(T_SMALLOC_PROGS)
@@ -301,8 +345,36 @@ T_TEST_PROGS += $(T_GEN_RAND_PROGS)
 T_PROGS += $(T_BTRACE_FIO_PROGS)
 T_PROGS += $(T_DEDUPE_PROGS)
 T_PROGS += $(T_VS_PROGS)
+T_TEST_PROGS += $(T_MEMLOCK_PROGS)
+ifdef CONFIG_PREAD
+T_TEST_PROGS += $(T_PIPE_ASYNC_PROGS)
+endif
+ifneq (,$(findstring Linux,$(CONFIG_TARGET_OS)))
+T_TEST_PROGS += $(T_IOU_RING_PROGS)
+endif
 
 PROGS += $(T_PROGS)
+
+ifdef CONFIG_HAVE_CUNIT
+UT_OBJS = unittests/unittest.o
+UT_OBJS += unittests/lib/memalign.o
+UT_OBJS += unittests/lib/strntol.o
+UT_OBJS += unittests/oslib/strlcat.o
+UT_OBJS += unittests/oslib/strndup.o
+UT_OBJS += unittests/oslib/strcasestr.o
+UT_OBJS += unittests/oslib/strsep.o
+UT_TARGET_OBJS = lib/memalign.o
+UT_TARGET_OBJS += lib/strntol.o
+UT_TARGET_OBJS += oslib/strlcat.o
+UT_TARGET_OBJS += oslib/strndup.o
+UT_TARGET_OBJS += oslib/strcasestr.o
+UT_TARGET_OBJS += oslib/strsep.o
+UT_PROGS = unittests/unittest
+else
+UT_OBJS =
+UT_TARGET_OBJS =
+UT_PROGS =
+endif
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
@@ -330,7 +402,7 @@ mandir = $(prefix)/man
 sharedir = $(prefix)/share/fio
 endif
 
-all: $(PROGS) $(T_TEST_PROGS) $(SCRIPTS) FORCE
+all: $(PROGS) $(T_TEST_PROGS) $(UT_PROGS) $(SCRIPTS) FORCE
 
 .PHONY: all install clean test
 .PHONY: FORCE cscope
@@ -347,8 +419,14 @@ override CFLAGS += -DFIO_VERSION='"$(FIO_VERSION)"'
 	$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
 	@mv -f $*.d $*.d.tmp
 	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
-	@sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 | \
-		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d
+	@if type -p fmt >/dev/null 2>&1; then				\
+		sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 |	\
+		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d;			\
+	else								\
+		sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp |		\
+		tr -cs "[:graph:]" "\n" |				\
+		sed -e 's/^ *//' -e '/^$$/ d' -e 's/$$/:/' >> $*.d;	\
+	fi
 	@rm -f $*.d.tmp
 
 %.o : %.cpp
@@ -392,14 +470,6 @@ parse.o: lex.yy.o y.tab.o
 endif
 
 init.o: init.c FIO-VERSION-FILE
-	@mkdir -p $(dir $@)
-	$(QUIET_CC)$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -c $<
-	@$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
-	@mv -f $*.d $*.d.tmp
-	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
-	@sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 | \
-		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d
-	@rm -f $*.d.tmp
 
 gcompat.o: gcompat.c gcompat.h
 	$(QUIET_CC)$(CC) $(CFLAGS) $(GTK_CFLAGS) $(CPPFLAGS) -c $<
@@ -427,6 +497,10 @@ cairo_text_helpers.o: cairo_text_helpers.c cairo_text_helpers.h
 
 printing.o: printing.c printing.h
 	$(QUIET_CC)$(CC) $(CFLAGS) $(GTK_CFLAGS) $(CPPFLAGS) -c $<
+
+t/io_uring.o: os/linux/io_uring.h
+t/io_uring: $(T_IOU_RING_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_IOU_RING_OBJS) $(LIBS)
 
 t/read-to-pipe-async: $(T_PIPE_ASYNC_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_PIPE_ASYNC_OBJS) $(LIBS)
@@ -469,8 +543,17 @@ t/fio-dedupe: $(T_DEDUPE_OBJS)
 t/fio-verify-state: $(T_VS_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_VS_OBJS) $(LIBS)
 
+t/time-test: $(T_TT_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_TT_OBJS) $(LIBS)
+
+ifdef CONFIG_HAVE_CUNIT
+unittests/unittest: $(UT_OBJS) $(UT_TARGET_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(UT_OBJS) $(UT_TARGET_OBJS) -lcunit $(LIBS)
+endif
+
 clean: FORCE
-	@rm -f .depend $(FIO_OBJS) $(GFIO_OBJS) $(OBJS) $(T_OBJS) $(PROGS) $(T_PROGS) $(T_TEST_PROGS) core.* core gfio FIO-VERSION-FILE *.d lib/*.d oslib/*.d crc/*.d engines/*.d profiles/*.d t/*.d config-host.mak config-host.h y.tab.[ch] lex.yy.c exp/*.[do] lexer.h
+	@rm -f .depend $(FIO_OBJS) $(GFIO_OBJS) $(OBJS) $(T_OBJS) $(UT_OBJS) $(PROGS) $(T_PROGS) $(T_TEST_PROGS) core.* core gfio unittests/unittest FIO-VERSION-FILE *.[do] lib/*.d oslib/*.[do] crc/*.d engines/*.[do] profiles/*.[do] t/*.[do] unittests/*.[do] unittests/*/*.[do] config-host.mak config-host.h y.tab.[ch] lex.yy.c exp/*.[do] lexer.h
+	@rm -f t/fio-btrace2fio t/io_uring t/read-to-pipe-async
 	@rm -rf  doc/output
 
 distclean: clean FORCE
@@ -489,7 +572,22 @@ doc: tools/plot/fio2gnuplot.1
 	@man -t tools/hist/fiologparser_hist.py.1 | ps2pdf - fiologparser_hist.pdf
 
 test: fio
-	./fio --minimal --thread --ioengine=null --runtime=1s --name=nulltest --rw=randrw --iodepth=2 --norandommap --random_generator=tausworthe64 --size=16T --name=verifynulltest --rw=write --verify=crc32c --verify_state_save=0 --size=100M
+	./fio --minimal --thread --exitall_on_error --runtime=1s --name=nulltest --ioengine=null --rw=randrw --iodepth=2 --norandommap --random_generator=tausworthe64 --size=16T --name=verifyfstest --filename=fiotestfile.tmp --unlink=1 --rw=write --verify=crc32c --verify_state_save=0 --size=16K
+
+fulltest:
+	sudo modprobe null_blk &&				 	\
+	if [ ! -e /usr/include/libzbc/zbc.h ]; then			\
+	  git clone https://github.com/hgst/libzbc &&		 	\
+	  (cd libzbc &&						 	\
+	   ./autogen.sh &&					 	\
+	   ./configure --prefix=/usr &&				 	\
+	   make -j &&						 	\
+	   sudo make install)						\
+	fi &&					 			\
+	sudo t/zbd/run-tests-against-regular-nullb &&		 	\
+	if [ -e /sys/module/null_blk/parameters/zoned ]; then		\
+		sudo t/zbd/run-tests-against-zoned-nullb;	 	\
+	fi
 
 install: $(PROGS) $(SCRIPTS) tools/plot/fio2gnuplot.1 FORCE
 	$(INSTALL) -m 755 -d $(DESTDIR)$(bindir)
@@ -501,3 +599,5 @@ install: $(PROGS) $(SCRIPTS) tools/plot/fio2gnuplot.1 FORCE
 	$(INSTALL) -m 644 $(SRCDIR)/tools/hist/fiologparser_hist.py.1 $(DESTDIR)$(mandir)/man1
 	$(INSTALL) -m 755 -d $(DESTDIR)$(sharedir)
 	$(INSTALL) -m 644 $(SRCDIR)/tools/plot/*gpm $(DESTDIR)$(sharedir)/
+
+.PHONY: test fulltest

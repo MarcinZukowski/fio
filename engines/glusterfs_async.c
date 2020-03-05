@@ -70,34 +70,36 @@ static void fio_gf_io_u_free(struct thread_data *td, struct io_u *io_u)
 
 static int fio_gf_io_u_init(struct thread_data *td, struct io_u *io_u)
 {
+    struct fio_gf_iou *io;
 	dprint(FD_FILE, "%s\n", __FUNCTION__);
-
-	if (!io_u->engine_data) {
-		struct fio_gf_iou *io;
-
-		io = malloc(sizeof(struct fio_gf_iou));
-		if (!io) {
-			td_verror(td, errno, "malloc");
-			return 1;
-		}
-		io->io_complete = 0;
-		io->io_u = io_u;
-		io_u->engine_data = io;
-	}
+    
+    io = malloc(sizeof(struct fio_gf_iou));
+    if (!io) {
+        td_verror(td, errno, "malloc");
+        return 1;
+    }
+    io->io_complete = 0;
+    io->io_u = io_u;
+    io_u->engine_data = io;
 	return 0;
 }
 
+#if defined(CONFIG_GF_NEW_API)
+static void gf_async_cb(glfs_fd_t * fd, ssize_t ret, struct glfs_stat *prestat,
+			struct glfs_stat *poststat, void *data)
+#else
 static void gf_async_cb(glfs_fd_t * fd, ssize_t ret, void *data)
+#endif
 {
 	struct io_u *io_u = data;
 	struct fio_gf_iou *iou = io_u->engine_data;
 
-	dprint(FD_IO, "%s ret %lu\n", __FUNCTION__, ret);
+	dprint(FD_IO, "%s ret %zd\n", __FUNCTION__, ret);
 	iou->io_complete = 1;
 }
 
-static int fio_gf_async_queue(struct thread_data fio_unused * td,
-			      struct io_u *io_u)
+static enum fio_q_status fio_gf_async_queue(struct thread_data fio_unused * td,
+					    struct io_u *io_u)
 {
 	struct gf_data *g = td->io_ops_data;
 	int r;

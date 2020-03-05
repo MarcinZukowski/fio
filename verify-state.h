@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <limits.h>
+#include "lib/nowarn_snprintf.h"
 
 struct thread_rand32_state {
 	uint32_t s[4];
@@ -77,7 +78,7 @@ static inline size_t thread_io_list_sz(struct thread_io_list *s)
 
 static inline struct thread_io_list *io_list_next(struct thread_io_list *s)
 {
-	return (void *) s + thread_io_list_sz(s);
+	return (struct thread_io_list *)((char *) s + thread_io_list_sz(s));
 }
 
 static inline void verify_state_gen_name(char *out, size_t size,
@@ -101,7 +102,7 @@ static inline void verify_state_gen_name(char *out, size_t size,
 		name++;
 	} while (1);
 
-	snprintf(out, size, "%s-%s-%d-verify.state", prefix, ename, num);
+	nowarn_snprintf(out, size, "%s-%s-%d-verify.state", prefix, ename, num);
 	out[size - 1] = '\0';
 }
 

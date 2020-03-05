@@ -1,13 +1,6 @@
-#include <stdlib.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <unistd.h>
 
-#include "compiler/compiler.h"
-#include "arch/arch.h"
-#include "os/os.h"
+#include "helpers.h"
 
 #ifndef CONFIG_LINUX_FALLOCATE
 int fallocate(int fd, int mode, off_t offset, off_t len)
@@ -25,7 +18,8 @@ int posix_fallocate(int fd, off_t offset, off_t len)
 #endif
 
 #ifndef CONFIG_SYNC_FILE_RANGE
-int sync_file_range(int fd, off64_t offset, off64_t nbytes, unsigned int flags)
+int sync_file_range(int fd, uint64_t offset, uint64_t nbytes,
+		    unsigned int flags)
 {
 	errno = ENOSYS;
 	return -1;

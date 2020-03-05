@@ -13,17 +13,14 @@
 #include <stdlib.h>
 
 #include "../smalloc.h"
+#include "../debug.h"
 #include "../file.h"
 #include "../log.h"
 #include "../lib/hweight.h"
 #include "../oslib/strcasestr.h"
+#include "../lib/types.h"
 
 #include "windows/posix.h"
-
-/* Cygwin doesn't define rand_r if C99 or newer is being used */
-#if defined(WIN32) && !defined(rand_r)
-int rand_r(unsigned *);
-#endif
 
 #ifndef PTHREAD_STACK_MIN
 #define PTHREAD_STACK_MIN 65535
@@ -33,21 +30,17 @@ int rand_r(unsigned *);
 #define FIO_HAVE_CPU_AFFINITY
 #define FIO_HAVE_CHARDEV_SIZE
 #define FIO_HAVE_GETTID
-#define FIO_USE_GENERIC_RAND
+#define FIO_EMULATED_MKDIR_TWO
 
 #define FIO_PREFERRED_ENGINE		"windowsaio"
 #define FIO_PREFERRED_CLOCK_SOURCE	CS_CGETTIME
-#define FIO_OS_PATH_SEPARATOR		"\\"
-
-#define FIO_MAX_CPUS	MAXIMUM_PROCESSORS
+#define FIO_OS_PATH_SEPARATOR		'\\'
 
 #define OS_MAP_ANON		MAP_ANON
 
 #define fio_swap16(x)	_byteswap_ushort(x)
 #define fio_swap32(x)	_byteswap_ulong(x)
 #define fio_swap64(x)	_byteswap_uint64(x)
-
-typedef DWORD_PTR os_cpu_mask_t;
 
 #define _SC_PAGESIZE			0x1
 #define _SC_NPROCESSORS_ONLN	0x2
@@ -76,10 +69,9 @@ typedef DWORD_PTR os_cpu_mask_t;
 /* Winsock doesn't support MSG_WAIT */
 #define OS_MSG_DONTWAIT	0
 
-#define POLLOUT	1
-#define POLLIN	2
-#define POLLERR	0
-#define POLLHUP	1
+#ifndef S_ISSOCK
+#define S_ISSOCK(x) 0
+#endif
 
 #define SIGCONT	0
 #define SIGUSR1	1
@@ -116,7 +108,6 @@ int nanosleep(const struct timespec *rqtp, struct timespec *rmtp);
 ssize_t pread(int fildes, void *buf, size_t nbyte, off_t offset);
 ssize_t pwrite(int fildes, const void *buf, size_t nbyte,
 		off_t offset);
-extern void td_fill_rand_seeds(struct thread_data *);
 
 static inline int blockdev_size(struct fio_file *f, unsigned long long *bytes)
 {
@@ -167,79 +158,14 @@ static inline unsigned long long os_phys_mem(void)
 	return (unsigned long long) pages * (unsigned long long) pagesize;
 }
 
+#ifndef CONFIG_HAVE_GETTID
 static inline int gettid(void)
 {
 	return GetCurrentThreadId();
 }
+#endif
 
-static inline int fio_setaffinity(int pid, os_cpu_mask_t cpumask)
-{
-	HANDLE h;
-	BOOL bSuccess = FALSE;
-
-	h = OpenThread(THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION, TRUE, pid);
-	if (h != NULL) {
-		bSuccess = SetThreadAffinityMask(h, cpumask);
-		if (!bSuccess)
-			log_err("fio_setaffinity failed: failed to set thread affinity (pid %d, mask %.16llx)\n", pid, cpumask);
-
-		CloseHandle(h);
-	} else {
-		log_err("fio_setaffinity failed: failed to get handle for pid %d\n", pid);
-	}
-
-	return (bSuccess)? 0 : -1;
-}
-
-static inline int fio_getaffinity(int pid, os_cpu_mask_t *mask)
-{
-	os_cpu_mask_t systemMask;
-
-	HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, TRUE, pid);
-
-	if (h != NULL) {
-		GetProcessAffinityMask(h, mask, &systemMask);
-		CloseHandle(h);
-	} else {
-		log_err("fio_getaffinity failed: failed to get handle for pid %d\n", pid);
-		return -1;
-	}
-
-	return 0;
-}
-
-static inline void fio_cpu_clear(os_cpu_mask_t *mask, int cpu)
-{
-	*mask ^= 1 << (cpu-1);
-}
-
-static inline void fio_cpu_set(os_cpu_mask_t *mask, int cpu)
-{
-	*mask |= 1 << cpu;
-}
-
-static inline int fio_cpu_isset(os_cpu_mask_t *mask, int cpu)
-{
-	return (*mask & (1U << cpu));
-}
-
-static inline int fio_cpu_count(os_cpu_mask_t *mask)
-{
-	return hweight64(*mask);
-}
-
-static inline int fio_cpuset_init(os_cpu_mask_t *mask)
-{
-	*mask = 0;
-	return 0;
-}
-
-static inline int fio_cpuset_exit(os_cpu_mask_t *mask)
-{
-	return 0;
-}
-
-static inline int init_random_state(struct thread_data *td, unsigned long *rand_seeds, int size)
+static inline int init_random_seeds(uint64_t *rand_seeds, int size)
 {
 	HCRYPTPROV hCryptProv;
 
@@ -258,10 +184,8 @@ static inline int init_random_state(struct thread_data *td, unsigned long *rand_
 	}
 
 	CryptReleaseContext(hCryptProv, 0);
-	td_fill_rand_seeds(td);
 	return 0;
 }
-
 
 static inline int fio_set_sched_idle(void)
 {
@@ -269,5 +193,44 @@ static inline int fio_set_sched_idle(void)
 	return (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE))? 0 : -1;
 }
 
+static inline int fio_mkdir(const char *path, mode_t mode) {
+	DWORD dwAttr = GetFileAttributesA(path);
+
+	if (dwAttr != INVALID_FILE_ATTRIBUTES &&
+	    (dwAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+		errno = EEXIST;
+		return -1;
+	}
+
+	if (CreateDirectoryA(path, NULL) == 0) {
+		/* Ignore errors if path is a device namespace */
+		if (strcmp(path, "\\\\.") == 0) {
+			errno = EEXIST;
+			return -1;
+		}
+		errno = win_to_posix_error(GetLastError());
+		return -1;
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_WINDOWS_XP
+#include "os-windows-xp.h"
+#else
+#define FIO_HAVE_CPU_ONLINE_SYSCONF
+unsigned int cpus_online(void);
+#include "os-windows-7.h"
+#endif
+
+int first_set_cpu(os_cpu_mask_t *cpumask);
+int fio_setaffinity(int pid, os_cpu_mask_t cpumask);
+int fio_cpuset_init(os_cpu_mask_t *mask);
+int fio_getaffinity(int pid, os_cpu_mask_t *mask);
+void fio_cpu_clear(os_cpu_mask_t *mask, int cpu);
+void fio_cpu_set(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_isset(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_count(os_cpu_mask_t *mask);
+int fio_cpuset_exit(os_cpu_mask_t *mask);
 
 #endif /* FIO_OS_WINDOWS_H */

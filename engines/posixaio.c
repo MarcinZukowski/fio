@@ -166,8 +166,8 @@ static struct io_u *fio_posixaio_event(struct thread_data *td, int event)
 	return pd->aio_events[event];
 }
 
-static int fio_posixaio_queue(struct thread_data *td,
-			      struct io_u *io_u)
+static enum fio_q_status fio_posixaio_queue(struct thread_data *td,
+					    struct io_u *io_u)
 {
 	struct posixaio_data *pd = td->io_ops_data;
 	os_aiocb_t *aiocb = &io_u->aiocb;
@@ -243,6 +243,7 @@ static int fio_posixaio_init(struct thread_data *td)
 static struct ioengine_ops ioengine = {
 	.name		= "posixaio",
 	.version	= FIO_IOOPS_VERSION,
+	.flags		= FIO_ASYNCIO_SYNC_TRIM,
 	.init		= fio_posixaio_init,
 	.prep		= fio_posixaio_prep,
 	.queue		= fio_posixaio_queue,

@@ -14,7 +14,7 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
 
@@ -204,9 +204,9 @@ static void setup_to_parse_string(const char *string)
 {
 	unsigned int len;
 
-	len = strlen(string);
-	if (len > sizeof(lexer_input_buffer) - 3)
-		len = sizeof(lexer_input_buffer) - 3;
+	len = sizeof(lexer_input_buffer) - 3;
+	if (len > strlen(string))
+		len = strlen(string);
 
 	strncpy(lexer_input_buffer, string, len);
 	lexer_input_buffer[len] = '\0'; 

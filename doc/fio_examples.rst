@@ -69,4 +69,13 @@ Testing S3 access
 :download:`Download s3.fio <../examples/s3.fio>`
 
 .. literalinclude:: ../examples/s3.fio
+
+Butterfly seek pattern
+-----------------------
+
+.. only:: builder_html
+
+:download:`Download butterfly.fio <../examples/butterfly.fio>`
+
+.. literalinclude:: ../examples/butterfly.fio
 	:language: ini

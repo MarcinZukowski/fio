@@ -1,10 +1,3 @@
-#include <inttypes.h>
-#include <string.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include "crc32c.h"
 
 /*
@@ -18,7 +11,7 @@
  * Volume 2A: Instruction Set Reference, A-M
  */
 
-int crc32c_intel_available = 0;
+bool crc32c_intel_available = false;
 
 #ifdef ARCH_HAVE_SSE4_2
 
@@ -30,7 +23,7 @@ int crc32c_intel_available = 0;
 #define SCALE_F 4
 #endif
 
-static int crc32c_probed;
+static bool crc32c_probed;
 
 static uint32_t crc32c_intel_le_hw_byte(uint32_t crc, unsigned char const *data,
 					unsigned long length)
@@ -87,8 +80,8 @@ void crc32c_intel_probe(void)
 
 		do_cpuid(&eax, &ebx, &ecx, &edx);
 		crc32c_intel_available = (ecx & (1 << 20)) != 0;
-		crc32c_probed = 1;
+		crc32c_probed = true;
 	}
 }
 
-#endif /* ARCH_HAVE_SSE */
+#endif /* ARCH_HAVE_SSE4_2 */

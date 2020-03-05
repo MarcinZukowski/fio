@@ -1,17 +1,18 @@
 #ifndef FIO_IOENGINE_H
 #define FIO_IOENGINE_H
 
+#include <stddef.h>
+
 #include "compiler/compiler.h"
-#include "os/os.h"
-#include "file.h"
+#include "flist.h"
 #include "io_u.h"
 
-#define FIO_IOOPS_VERSION	23
+#define FIO_IOOPS_VERSION	25
 
 /*
  * io_ops->queue() return values
  */
-enum {
+enum fio_q_status {
 	FIO_Q_COMPLETED	= 0,		/* completed sync */
 	FIO_Q_QUEUED	= 1,		/* queued, will complete async */
 	FIO_Q_BUSY	= 2,		/* no more room, call ->commit() */
@@ -24,8 +25,9 @@ struct ioengine_ops {
 	int flags;
 	int (*setup)(struct thread_data *);
 	int (*init)(struct thread_data *);
+	int (*post_init)(struct thread_data *);
 	int (*prep)(struct thread_data *, struct io_u *);
-	int (*queue)(struct thread_data *, struct io_u *);
+	enum fio_q_status (*queue)(struct thread_data *, struct io_u *);
 	int (*commit)(struct thread_data *);
 	int (*getevents)(struct thread_data *, unsigned int, unsigned int, const struct timespec *);
 	struct io_u *(*event)(struct thread_data *, int);
@@ -59,6 +61,10 @@ enum fio_ioengine_flags {
 	FIO_MEMALIGN	= 1 << 9,	/* engine wants aligned memory */
 	FIO_BIT_BASED	= 1 << 10,	/* engine uses a bit base (e.g. uses Kbit as opposed to KB) */
 	FIO_FAKEIO	= 1 << 11,	/* engine pretends to do IO */
+	FIO_NOSTATS	= 1 << 12,	/* don't do IO stats */
+	FIO_NOFILEHASH	= 1 << 13,	/* doesn't hash the files for lookup later. */
+	FIO_ASYNCIO_SYNC_TRIM
+			= 1 << 14	/* io engine has async ->queue except for trim */
 };
 
 /*
@@ -71,15 +77,15 @@ typedef void (*get_ioengine_t)(struct ioengine_ops **);
  */
 extern int __must_check td_io_init(struct thread_data *);
 extern int __must_check td_io_prep(struct thread_data *, struct io_u *);
-extern int __must_check td_io_queue(struct thread_data *, struct io_u *);
+extern enum fio_q_status __must_check td_io_queue(struct thread_data *, struct io_u *);
 extern int __must_check td_io_getevents(struct thread_data *, unsigned int, unsigned int, const struct timespec *);
-extern int __must_check td_io_commit(struct thread_data *);
+extern void td_io_commit(struct thread_data *);
 extern int __must_check td_io_open_file(struct thread_data *, struct fio_file *);
 extern int td_io_close_file(struct thread_data *, struct fio_file *);
 extern int td_io_unlink_file(struct thread_data *, struct fio_file *);
 extern int __must_check td_io_get_file_size(struct thread_data *, struct fio_file *);
 
-extern struct ioengine_ops *load_ioengine(struct thread_data *, const char *);
+extern struct ioengine_ops *load_ioengine(struct thread_data *);
 extern void register_ioengine(struct ioengine_ops *);
 extern void unregister_ioengine(struct ioengine_ops *);
 extern void free_ioengine(struct thread_data *);

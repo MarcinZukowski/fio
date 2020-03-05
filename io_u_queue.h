@@ -2,6 +2,9 @@
 #define FIO_IO_U_QUEUE
 
 #include <assert.h>
+#include <stddef.h>
+
+#include "lib/types.h"
 
 struct io_u;
 
@@ -42,8 +45,8 @@ static inline int io_u_qempty(const struct io_u_queue *q)
 #define io_u_qiter(q, io_u, i)	\
 	for (i = 0; i < (q)->nr && (io_u = (q)->io_us[i]); i++)
 
-int io_u_qinit(struct io_u_queue *q, unsigned int nr);
-void io_u_qexit(struct io_u_queue *q);
+bool io_u_qinit(struct io_u_queue *q, unsigned int nr, bool shared);
+void io_u_qexit(struct io_u_queue *q, bool shared);
 
 struct io_u_ring {
 	unsigned int head;
@@ -52,7 +55,7 @@ struct io_u_ring {
 	struct io_u **ring;
 };
 
-int io_u_rinit(struct io_u_ring *ring, unsigned int nr);
+bool io_u_rinit(struct io_u_ring *ring, unsigned int nr);
 void io_u_rexit(struct io_u_ring *ring);
 
 static inline void io_u_rpush(struct io_u_ring *r, struct io_u *io_u)

@@ -1,14 +1,13 @@
 #ifndef FIO_COMPILER_H
 #define FIO_COMPILER_H
-#include <assert.h>
 
-#if __GNUC__ >= 4
+/* IWYU pragma: begin_exports */
+#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 1)
 #include "compiler-gcc4.h"
-#elif __GNUC__ == 3
-#include "compiler-gcc3.h"
 #else
-#error Compiler too old, need gcc at least gcc 3.x
+#error Compiler too old, need at least gcc 4.1.0
 #endif
+/* IWYU pragma: end_exports */
 
 #ifndef __must_check
 #define __must_check
@@ -29,7 +28,7 @@
  */
 #define typecheck(type,x) \
 ({	type __dummy; \
-	typeof(x) __dummy2; \
+	__typeof__(x) __dummy2; \
 	(void)(&__dummy == &__dummy2); \
 	1; \
 })
@@ -67,6 +66,11 @@
 
 #define compiletime_assert(condition, msg)	do { } while (0)
 
+#endif
+
+#ifdef FIO_INTERNAL
+#define ARRAY_SIZE(x)    (sizeof((x)) / (sizeof((x)[0])))
+#define FIELD_SIZE(s, f) (sizeof(((__typeof__(s))0)->f))
 #endif
 
 #endif

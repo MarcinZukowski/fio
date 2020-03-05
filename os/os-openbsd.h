@@ -9,23 +9,21 @@
 #include <sys/ioctl.h>
 #include <sys/dkio.h>
 #include <sys/disklabel.h>
+#include <sys/endian.h>
 #include <sys/utsname.h>
-/* XXX hack to avoid conflicts between rbtree.h and <sys/tree.h> */
 #include <sys/sysctl.h>
+
+/* XXX hack to avoid conflicts between rbtree.h and <sys/tree.h> */
 #undef RB_BLACK
 #undef RB_RED
 #undef RB_ROOT
 
 #include "../file.h"
 
-#undef  FIO_HAVE_ODIRECT
-#define FIO_USE_GENERIC_RAND
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_FS_STAT
 #define FIO_HAVE_GETTID
 #define FIO_HAVE_SHM_ATTACH_REMOVED
-
-#undef	FIO_HAVE_CPU_AFFINITY	/* doesn't exist */
 
 #define OS_MAP_ANON		MAP_ANON
 
@@ -33,11 +31,9 @@
 #define PTHREAD_STACK_MIN 4096
 #endif
 
-#define fio_swap16(x)	bswap16(x)
-#define fio_swap32(x)	bswap32(x)
-#define fio_swap64(x)	bswap64(x)
-
-typedef off_t off64_t;
+#define fio_swap16(x)	swap16(x)
+#define fio_swap32(x)	swap32(x)
+#define fio_swap64(x)	swap64(x)
 
 static inline int blockdev_size(struct fio_file *f, unsigned long long *bytes)
 {
@@ -67,10 +63,12 @@ static inline unsigned long long os_phys_mem(void)
 	return mem;
 }
 
+#ifndef CONFIG_HAVE_GETTID
 static inline int gettid(void)
 {
 	return (int)(intptr_t) pthread_self();
 }
+#endif
 
 static inline unsigned long long get_fs_free_size(const char *path)
 {

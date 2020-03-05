@@ -6,7 +6,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <sys/fcntl.h>
+#include <fcntl.h>
 #include <sys/fadvise.h>
 #include <sys/mman.h>
 #include <sys/mpctl.h>
@@ -20,7 +20,6 @@
 #include "../file.h"
 
 #define FIO_HAVE_ODIRECT
-#define FIO_USE_GENERIC_RAND
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_CHARDEV_SIZE
 

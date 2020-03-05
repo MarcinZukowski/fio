@@ -1,17 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <math.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 
 #include "../lib/lfsr.h"
 #include "../gettime.h"
 #include "../fio_time.h"
 
-void usage()
+static void usage(void)
 {
 	printf("Usage: lfsr-test 0x<numbers> [seed] [spin] [verify]\n");
 	printf("-------------------------------------------------------------\n");
@@ -27,7 +23,7 @@ void usage()
 int main(int argc, char *argv[])
 {
 	int r;
-	struct timeval start, end;
+	struct timespec start, end;
 	struct fio_lfsr *fl;
 	int verify = 0;
 	unsigned int spin = 0;
@@ -43,9 +39,12 @@ int main(int argc, char *argv[])
 	/* Read arguments */
 	switch (argc) {
 		case 5: if (strncmp(argv[4], "verify", 7) == 0)
-					verify = 1;
+				verify = 1;
+			/* fall through */
 		case 4: spin = atoi(argv[3]);
+			/* fall through */
 		case 3: seed = atol(argv[2]);
+			/* fall through */
 		case 2: numbers = strtol(argv[1], NULL, 16);
 				break;
 		default: usage();

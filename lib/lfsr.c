@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <math.h>
 
 #include "lfsr.h"
 #include "../compiler/compiler.h"
@@ -79,7 +78,7 @@ static uint8_t lfsr_taps[64][FIO_MAX_TAPS] =
 
 #define __LFSR_NEXT(__fl, __v)						\
 	__v = ((__v >> 1) | __fl->cached_bit) ^			\
-			(((__v & 1UL) - 1UL) & __fl->xormask);
+			(((__v & 1ULL) - 1ULL) & __fl->xormask);
 
 static inline void __lfsr_next(struct fio_lfsr *fl, unsigned int spin)
 {
@@ -89,21 +88,37 @@ static inline void __lfsr_next(struct fio_lfsr *fl, unsigned int spin)
 	 */
 	switch (spin) {
 		case 15: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 14: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 13: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 12: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 11: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 10: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  9: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  8: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  7: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  6: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  5: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  4: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  3: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  2: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  1: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  0: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		default: break;
 	}
 }
@@ -147,7 +162,7 @@ static uint64_t lfsr_create_xormask(uint8_t *taps)
 	uint64_t xormask = 0;
 
 	for(i = 0; i < FIO_MAX_TAPS && taps[i] != 0; i++)
-		xormask |= 1UL << (taps[i] - 1);
+		xormask |= 1ULL << (taps[i] - 1);
 
 	return xormask;
 }
@@ -162,7 +177,7 @@ static uint8_t *find_lfsr(uint64_t size)
 	 * take that into account.
 	 */
 	for (i = 3; i < 64; i++)
-		if ((1UL << i) > size)
+		if ((1ULL << i) > size)
 			return lfsr_taps[i];
 
 	return NULL;
@@ -217,7 +232,7 @@ static int prepare_spin(struct fio_lfsr *fl, unsigned int spin)
 	return 0;
 }
 
-int lfsr_reset(struct fio_lfsr *fl, unsigned long seed)
+int lfsr_reset(struct fio_lfsr *fl, uint64_t seed)
 {
 	uint64_t bitmask = (fl->cached_bit << 1) - 1;
 
@@ -231,8 +246,8 @@ int lfsr_reset(struct fio_lfsr *fl, unsigned long seed)
 	return 0;
 }
 
-int lfsr_init(struct fio_lfsr *fl, uint64_t nums, unsigned long seed,
-		unsigned int spin)
+int lfsr_init(struct fio_lfsr *fl, uint64_t nums, uint64_t seed,
+	      unsigned int spin)
 {
 	uint8_t *taps;
 
@@ -242,7 +257,7 @@ int lfsr_init(struct fio_lfsr *fl, uint64_t nums, unsigned long seed,
 
 	fl->max_val = nums - 1;
 	fl->xormask = lfsr_create_xormask(taps);
-	fl->cached_bit = 1UL << (taps[0] - 1);
+	fl->cached_bit = 1ULL << (taps[0] - 1);
 
 	if (prepare_spin(fl, spin))
 		return 1;

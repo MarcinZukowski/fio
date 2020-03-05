@@ -1,17 +1,11 @@
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>
-#include <assert.h>
-#include <math.h>
-#include <string.h>
 
 #include "../lib/types.h"
-#include "../log.h"
-#include "../lib/lfsr.h"
-#include "../lib/axmap.h"
-#include "../smalloc.h"
-#include "../minmax.h"
 #include "../lib/rand.h"
+#include "../log.h"
 
 int main(int argc, char *argv[])
 {
@@ -40,7 +34,7 @@ int main(int argc, char *argv[])
 	init_rand(&s, false);
 
 	for (i = 0; i < nvalues; i++) {
-		int v = rand32_between(&s, start, end);
+		int v = rand_between(&s, start, end);
 
 		buckets[v - start]++;
 	}
@@ -63,6 +57,6 @@ int main(int argc, char *argv[])
 	}
 
 	printf("Passes=%lu, Fail=%lu\n", pass, fail);
-
+	free(buckets);
 	return 0;
 }

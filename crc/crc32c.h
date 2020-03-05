@@ -13,18 +13,21 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software Foundation,
-   Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
+   Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.  */
 
 #ifndef CRC32C_H
 #define CRC32C_H
 
+#include <inttypes.h>
+
 #include "../arch/arch.h"
+#include "../lib/types.h"
 
 extern uint32_t crc32c_sw(unsigned char const *, unsigned long);
-extern int crc32c_arm64_available;
-extern int crc32c_intel_available;
+extern bool crc32c_arm64_available;
+extern bool crc32c_intel_available;
 
-#ifdef ARCH_HAVE_ARM64_CRC_CRYPTO
+#ifdef ARCH_HAVE_CRC_CRYPTO
 extern uint32_t crc32c_arm64(unsigned char const *, unsigned long);
 extern void crc32c_arm64_probe(void);
 #else
@@ -32,7 +35,7 @@ extern void crc32c_arm64_probe(void);
 static inline void crc32c_arm64_probe(void)
 {
 }
-#endif
+#endif /* ARCH_HAVE_CRC_CRYPTO */
 
 #ifdef ARCH_HAVE_SSE4_2
 extern uint32_t crc32c_intel(unsigned char const *, unsigned long);
@@ -42,7 +45,7 @@ extern void crc32c_intel_probe(void);
 static inline void crc32c_intel_probe(void)
 {
 }
-#endif
+#endif /* ARCH_HAVE_SSE4_2 */
 
 static inline uint32_t fio_crc32c(unsigned char const *buf, unsigned long len)
 {

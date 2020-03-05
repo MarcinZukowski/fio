@@ -1,4 +1,5 @@
-#!/usr/bin/python
+#!/usr/bin/python2.7
+# Note: this script is python2 and python 3 compatible.
 #
 # fiologparser.py
 #
@@ -13,6 +14,8 @@
 #
 # to see per-interval average completion latency.
 
+from __future__ import absolute_import
+from __future__ import print_function
 import argparse
 import math
 
@@ -218,4 +221,3 @@ if __name__ == '__main__':
         print_all_stats(ctx, series)
     else:
         print_default(ctx, series)
-

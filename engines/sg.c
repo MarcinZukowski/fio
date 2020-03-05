@@ -3,26 +3,143 @@
  *
  * IO engine that uses the Linux SG v3 interface to talk to SCSI devices
  *
+ * This ioengine can operate in two modes:
+ *	sync	with block devices (/dev/sdX) or
+ *		with character devices (/dev/sgY) with direct=1 or sync=1
+ *	async	with character devices with direct=0 and sync=0
+ *
+ * What value does queue() return for the different cases?
+ *				queue() return value
+ * In sync mode:
+ *  /dev/sdX		RWT	FIO_Q_COMPLETED
+ *  /dev/sgY		RWT	FIO_Q_COMPLETED
+ *   with direct=1 or sync=1
+ *
+ * In async mode:
+ *  /dev/sgY		RWT	FIO_Q_QUEUED
+ *   direct=0 and sync=0
+ *
+ * Because FIO_SYNCIO is set for this ioengine td_io_queue() will fill in
+ * issue_time *before* each IO is sent to queue()
+ *
+ * Where are the IO counting functions called for the different cases?
+ *
+ * In sync mode:
+ *  /dev/sdX (commit==NULL)
+ *   RWT
+ *    io_u_mark_depth()			called in td_io_queue()
+ *    io_u_mark_submit/complete()	called in td_io_queue()
+ *    issue_time			set in td_io_queue()
+ *
+ *  /dev/sgY with direct=1 or sync=1 (commit does nothing)
+ *   RWT
+ *    io_u_mark_depth()			called in td_io_queue()
+ *    io_u_mark_submit/complete()	called in queue()
+ *    issue_time			set in td_io_queue()
+ *  
+ * In async mode:
+ *  /dev/sgY with direct=0 and sync=0
+ *   RW: read and write operations are submitted in queue()
+ *    io_u_mark_depth()			called in td_io_commit()
+ *    io_u_mark_submit()		called in queue()
+ *    issue_time			set in td_io_queue()
+ *   T: trim operations are queued in queue() and submitted in commit()
+ *    io_u_mark_depth()			called in td_io_commit()
+ *    io_u_mark_submit()		called in commit()
+ *    issue_time			set in commit()
+ *
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
-#include <assert.h>
-#include <sys/poll.h>
+#include <poll.h>
 
 #include "../fio.h"
+#include "../optgroup.h"
 
 #ifdef FIO_HAVE_SGIO
+
+enum {
+	FIO_SG_WRITE		= 1,
+	FIO_SG_WRITE_VERIFY	= 2,
+	FIO_SG_WRITE_SAME	= 3
+};
+
+struct sg_options {
+	void *pad;
+	unsigned int readfua;
+	unsigned int writefua;
+	unsigned int write_mode;
+};
+
+static struct fio_option options[] = {
+	{
+		.name	= "readfua",
+		.lname	= "sg engine read fua flag support",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct sg_options, readfua),
+		.help	= "Set FUA flag (force unit access) for all Read operations",
+		.def	= "0",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_SG,
+	},
+	{
+		.name	= "writefua",
+		.lname	= "sg engine write fua flag support",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct sg_options, writefua),
+		.help	= "Set FUA flag (force unit access) for all Write operations",
+		.def	= "0",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_SG,
+	},
+	{
+		.name	= "sg_write_mode",
+		.lname	= "specify sg write mode",
+		.type	= FIO_OPT_STR,
+		.off1	= offsetof(struct sg_options, write_mode),
+		.help	= "Specify SCSI WRITE mode",
+		.def	= "write",
+		.posval = {
+			  { .ival = "write",
+			    .oval = FIO_SG_WRITE,
+			    .help = "Issue standard SCSI WRITE commands",
+			  },
+			  { .ival = "verify",
+			    .oval = FIO_SG_WRITE_VERIFY,
+			    .help = "Issue SCSI WRITE AND VERIFY commands",
+			  },
+			  { .ival = "same",
+			    .oval = FIO_SG_WRITE_SAME,
+			    .help = "Issue SCSI WRITE SAME commands",
+			  },
+		},
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_SG,
+	},
+	{
+		.name	= NULL,
+	},
+};
 
 #define MAX_10B_LBA  0xFFFFFFFFULL
 #define SCSI_TIMEOUT_MS 30000   // 30 second timeout; currently no method to override
 #define MAX_SB 64               // sense block maximum return size
+/*
+#define FIO_SGIO_DEBUG
+*/
 
 struct sgio_cmd {
 	unsigned char cdb[16];      // enhanced from 10 to support 16 byte commands
 	unsigned char sb[MAX_SB];   // add sense block to commands
 	int nr;
+};
+
+struct sgio_trim {
+	uint8_t *unmap_param;
+	unsigned int unmap_range_count;
+	struct io_u **trim_io_us;
 };
 
 struct sgio_data {
@@ -33,7 +150,48 @@ struct sgio_data {
 	void *sgbuf;
 	unsigned int bs;
 	int type_checked;
+	struct sgio_trim **trim_queues;
+	int current_queue;
+#ifdef FIO_SGIO_DEBUG
+	unsigned int *trim_queue_map;
+#endif
 };
+
+static inline uint32_t sgio_get_be32(uint8_t *buf)
+{
+	return be32_to_cpu(*((uint32_t *) buf));
+}
+
+static inline uint64_t sgio_get_be64(uint8_t *buf)
+{
+	return be64_to_cpu(*((uint64_t *) buf));
+}
+
+static inline void sgio_set_be16(uint16_t val, uint8_t *buf)
+{
+	uint16_t t = cpu_to_be16(val);
+
+	memcpy(buf, &t, sizeof(uint16_t));
+}
+
+static inline void sgio_set_be32(uint32_t val, uint8_t *buf)
+{
+	uint32_t t = cpu_to_be32(val);
+
+	memcpy(buf, &t, sizeof(uint32_t));
+}
+
+static inline void sgio_set_be64(uint64_t val, uint8_t *buf)
+{
+	uint64_t t = cpu_to_be64(val);
+
+	memcpy(buf, &t, sizeof(uint64_t));
+}
+
+static inline bool sgio_unbuffered(struct thread_data *td)
+{
+	return (td->o.odirect || td->o.sync_io);
+}
 
 static void sgio_hdr_init(struct sgio_data *sd, struct sg_io_hdr *hdr,
 			  struct io_u *io_u, int fs)
@@ -50,6 +208,7 @@ static void sgio_hdr_init(struct sgio_data *sd, struct sg_io_hdr *hdr,
 	hdr->mx_sb_len = sizeof(sc->sb);
 	hdr->pack_id = io_u->index;
 	hdr->usr_ptr = io_u;
+	hdr->timeout = SCSI_TIMEOUT_MS;
 
 	if (fs) {
 		hdr->dxferp = io_u->xfer_buf;
@@ -102,10 +261,11 @@ static int fio_sgio_getevents(struct thread_data *td, unsigned int min,
 			      const struct timespec fio_unused *t)
 {
 	struct sgio_data *sd = td->io_ops_data;
-	int left = max, eventNum, ret, r = 0;
+	int left = max, eventNum, ret, r = 0, trims = 0;
 	void *buf = sd->sgbuf;
-	unsigned int i, events;
+	unsigned int i, j, events;
 	struct fio_file *f;
+	struct io_u *io_u;
 
 	/*
 	 * Fill in the file descriptors
@@ -123,10 +283,20 @@ static int fio_sgio_getevents(struct thread_data *td, unsigned int min,
 		sd->pfds[i].events = POLLIN;
 	}
 
-	while (left) {
-		void *p;
+	/*
+	** There are two counters here:
+	**  - number of SCSI commands completed
+	**  - number of io_us completed
+	**
+	** These are the same with reads and writes, but
+	** could differ with trim/unmap commands because
+	** a single unmap can include multiple io_us
+	*/
 
-		dprint(FD_IO, "sgio_getevents: sd %p: left=%d\n", sd, left);
+	while (left > 0) {
+		char *p;
+
+		dprint(FD_IO, "sgio_getevents: sd %p: min=%d, max=%d, left=%d\n", sd, min, max, left);
 
 		do {
 			if (!min)
@@ -154,15 +324,21 @@ re_read:
 		for_each_file(td, f, i) {
 			for (eventNum = 0; eventNum < left; eventNum++) {
 				ret = sg_fd_read(f->fd, p, sizeof(struct sg_io_hdr));
-				dprint(FD_IO, "sgio_getevents: ret: %d\n", ret);
+				dprint(FD_IO, "sgio_getevents: sg_fd_read ret: %d\n", ret);
 				if (ret) {
 					r = -ret;
 					td_verror(td, r, "sg_read");
 					break;
 				}
+				io_u = ((struct sg_io_hdr *)p)->usr_ptr;
+				if (io_u->ddir == DDIR_TRIM) {
+					events += sd->trim_queues[io_u->index]->unmap_range_count;
+					eventNum += sd->trim_queues[io_u->index]->unmap_range_count - 1;
+				} else
+					events++;
+
 				p += sizeof(struct sg_io_hdr);
-				events++;
-				dprint(FD_IO, "sgio_getevents: events: %d\n", events);
+				dprint(FD_IO, "sgio_getevents: events: %d, eventNum: %d, left: %d\n", events, eventNum, left);
 			}
 		}
 
@@ -178,14 +354,38 @@ re_read:
 
 		for (i = 0; i < events; i++) {
 			struct sg_io_hdr *hdr = (struct sg_io_hdr *) buf + i;
-			sd->events[i] = hdr->usr_ptr;
+			sd->events[i + trims] = hdr->usr_ptr;
+			io_u = (struct io_u *)(hdr->usr_ptr);
 
-			/* record if an io error occurred, ignore resid */
 			if (hdr->info & SG_INFO_CHECK) {
-				struct io_u *io_u;
-				io_u = (struct io_u *)(hdr->usr_ptr);
-				memcpy((void*)&(io_u->hdr), (void*)hdr, sizeof(struct sg_io_hdr));
-				sd->events[i]->error = EIO;
+				/* record if an io error occurred, ignore resid */
+				memcpy(&io_u->hdr, hdr, sizeof(struct sg_io_hdr));
+				sd->events[i + trims]->error = EIO;
+			}
+
+			if (io_u->ddir == DDIR_TRIM) {
+				struct sgio_trim *st = sd->trim_queues[io_u->index];
+#ifdef FIO_SGIO_DEBUG
+				assert(st->trim_io_us[0] == io_u);
+				assert(sd->trim_queue_map[io_u->index] == io_u->index);
+				dprint(FD_IO, "sgio_getevents: reaping %d io_us from trim queue %d\n", st->unmap_range_count, io_u->index);
+				dprint(FD_IO, "sgio_getevents: reaped io_u %d and stored in events[%d]\n", io_u->index, i+trims);
+#endif
+				for (j = 1; j < st->unmap_range_count; j++) {
+					++trims;
+					sd->events[i + trims] = st->trim_io_us[j];
+#ifdef FIO_SGIO_DEBUG
+					dprint(FD_IO, "sgio_getevents: reaped io_u %d and stored in events[%d]\n", st->trim_io_us[j]->index, i+trims);
+					assert(sd->trim_queue_map[st->trim_io_us[j]->index] == io_u->index);
+#endif
+					if (hdr->info & SG_INFO_CHECK) {
+						/* record if an io error occurred, ignore resid */
+						memcpy(&st->trim_io_us[j]->hdr, hdr, sizeof(struct sg_io_hdr));
+						sd->events[i + trims]->error = EIO;
+					}
+				}
+				events -= st->unmap_range_count - 1;
+				st->unmap_range_count = 0;
 			}
 		}
 	}
@@ -203,8 +403,9 @@ re_read:
 	return r;
 }
 
-static int fio_sgio_ioctl_doio(struct thread_data *td,
-			       struct fio_file *f, struct io_u *io_u)
+static enum fio_q_status fio_sgio_ioctl_doio(struct thread_data *td,
+					     struct fio_file *f,
+					     struct io_u *io_u)
 {
 	struct sgio_data *sd = td->io_ops_data;
 	struct sg_io_hdr *hdr = &io_u->hdr;
@@ -223,7 +424,9 @@ static int fio_sgio_ioctl_doio(struct thread_data *td,
 	return FIO_Q_COMPLETED;
 }
 
-static int fio_sgio_rw_doio(struct fio_file *f, struct io_u *io_u, int do_sync)
+static enum fio_q_status fio_sgio_rw_doio(struct thread_data *td,
+					  struct fio_file *f,
+					  struct io_u *io_u, int do_sync)
 {
 	struct sg_io_hdr *hdr = &io_u->hdr;
 	int ret;
@@ -233,13 +436,32 @@ static int fio_sgio_rw_doio(struct fio_file *f, struct io_u *io_u, int do_sync)
 		return ret;
 
 	if (do_sync) {
-		ret = read(f->fd, hdr, sizeof(*hdr));
-		if (ret < 0)
-			return ret;
+		/*
+		 * We can't just read back the first command that completes
+		 * and assume it's the one we need, it could be any command
+		 * that is inflight.
+		 */
+		do {
+			struct io_u *__io_u;
 
-		/* record if an io error occurred */
-		if (hdr->info & SG_INFO_CHECK)
-			io_u->error = EIO;
+			ret = read(f->fd, hdr, sizeof(*hdr));
+			if (ret < 0)
+				return ret;
+
+			__io_u = hdr->usr_ptr;
+
+			/* record if an io error occurred */
+			if (hdr->info & SG_INFO_CHECK)
+				__io_u->error = EIO;
+
+			if (__io_u == io_u)
+				break;
+
+			if (io_u_sync_complete(td, __io_u)) {
+				ret = -1;
+				break;
+			}
+		} while (1);
 
 		return FIO_Q_COMPLETED;
 	}
@@ -247,28 +469,46 @@ static int fio_sgio_rw_doio(struct fio_file *f, struct io_u *io_u, int do_sync)
 	return FIO_Q_QUEUED;
 }
 
-static int fio_sgio_doio(struct thread_data *td, struct io_u *io_u, int do_sync)
+static enum fio_q_status fio_sgio_doio(struct thread_data *td,
+				       struct io_u *io_u, int do_sync)
 {
 	struct fio_file *f = io_u->file;
-	int ret;
+	enum fio_q_status ret;
 
 	if (f->filetype == FIO_TYPE_BLOCK) {
 		ret = fio_sgio_ioctl_doio(td, f, io_u);
-		td->error = io_u->error;
+		if (io_u->error)
+			td_verror(td, io_u->error, __func__);
 	} else {
-		ret = fio_sgio_rw_doio(f, io_u, do_sync);
-		if (do_sync)
-			td->error = io_u->error;
+		ret = fio_sgio_rw_doio(td, f, io_u, do_sync);
+		if (io_u->error && do_sync)
+			td_verror(td, io_u->error, __func__);
 	}
 
 	return ret;
 }
 
+static void fio_sgio_rw_lba(struct sg_io_hdr *hdr, unsigned long long lba,
+			    unsigned long long nr_blocks)
+{
+	if (lba < MAX_10B_LBA) {
+		sgio_set_be32((uint32_t) lba, &hdr->cmdp[2]);
+		sgio_set_be16((uint16_t) nr_blocks, &hdr->cmdp[7]);
+	} else {
+		sgio_set_be64(lba, &hdr->cmdp[2]);
+		sgio_set_be32((uint32_t) nr_blocks, &hdr->cmdp[10]);
+	}
+
+	return;
+}
+
 static int fio_sgio_prep(struct thread_data *td, struct io_u *io_u)
 {
 	struct sg_io_hdr *hdr = &io_u->hdr;
+	struct sg_options *o = td->eo;
 	struct sgio_data *sd = td->io_ops_data;
-	long long nr_blocks, lba;
+	unsigned long long nr_blocks, lba;
+	int offset;
 
 	if (io_u->xfer_buflen & (sd->bs - 1)) {
 		log_err("read/write not sector aligned\n");
@@ -286,64 +526,132 @@ static int fio_sgio_prep(struct thread_data *td, struct io_u *io_u)
 			hdr->cmdp[0] = 0x28; // read(10)
 		else
 			hdr->cmdp[0] = 0x88; // read(16)
+
+		if (o->readfua)
+			hdr->cmdp[1] |= 0x08;
+
+		fio_sgio_rw_lba(hdr, lba, nr_blocks);
+
 	} else if (io_u->ddir == DDIR_WRITE) {
 		sgio_hdr_init(sd, hdr, io_u, 1);
 
 		hdr->dxfer_direction = SG_DXFER_TO_DEV;
-		if (lba < MAX_10B_LBA)
-			hdr->cmdp[0] = 0x2a; // write(10)
+		switch(o->write_mode) {
+		case FIO_SG_WRITE:
+			if (lba < MAX_10B_LBA)
+				hdr->cmdp[0] = 0x2a; // write(10)
+			else
+				hdr->cmdp[0] = 0x8a; // write(16)
+			if (o->writefua)
+				hdr->cmdp[1] |= 0x08;
+			break;
+		case FIO_SG_WRITE_VERIFY:
+			if (lba < MAX_10B_LBA)
+				hdr->cmdp[0] = 0x2e; // write and verify(10)
+			else
+				hdr->cmdp[0] = 0x8e; // write and verify(16)
+			break;
+			// BYTCHK is disabled by virtue of the memset in sgio_hdr_init
+		case FIO_SG_WRITE_SAME:
+			hdr->dxfer_len = sd->bs;
+			if (lba < MAX_10B_LBA)
+				hdr->cmdp[0] = 0x41; // write same(10)
+			else
+				hdr->cmdp[0] = 0x93; // write same(16)
+			break;
+		};
+
+		fio_sgio_rw_lba(hdr, lba, nr_blocks);
+
+	} else if (io_u->ddir == DDIR_TRIM) {
+		struct sgio_trim *st;
+
+		if (sd->current_queue == -1) {
+			sgio_hdr_init(sd, hdr, io_u, 0);
+
+			hdr->cmd_len = 10;
+			hdr->dxfer_direction = SG_DXFER_TO_DEV;
+			hdr->cmdp[0] = 0x42; // unmap
+			sd->current_queue = io_u->index;
+			st = sd->trim_queues[sd->current_queue];
+			hdr->dxferp = st->unmap_param;
+#ifdef FIO_SGIO_DEBUG
+			assert(sd->trim_queues[io_u->index]->unmap_range_count == 0);
+			dprint(FD_IO, "sg: creating new queue based on io_u %d\n", io_u->index);
+#endif
+		}
 		else
-			hdr->cmdp[0] = 0x8a; // write(16)
-	} else {
+			st = sd->trim_queues[sd->current_queue];
+
+		dprint(FD_IO, "sg: adding io_u %d to trim queue %d\n", io_u->index, sd->current_queue);
+		st->trim_io_us[st->unmap_range_count] = io_u;
+#ifdef FIO_SGIO_DEBUG
+		sd->trim_queue_map[io_u->index] = sd->current_queue;
+#endif
+
+		offset = 8 + 16 * st->unmap_range_count;
+		sgio_set_be64(lba, &st->unmap_param[offset]);
+		sgio_set_be32((uint32_t) nr_blocks, &st->unmap_param[offset + 8]);
+
+		st->unmap_range_count++;
+
+	} else if (ddir_sync(io_u->ddir)) {
 		sgio_hdr_init(sd, hdr, io_u, 0);
 		hdr->dxfer_direction = SG_DXFER_NONE;
 		if (lba < MAX_10B_LBA)
 			hdr->cmdp[0] = 0x35; // synccache(10)
 		else
 			hdr->cmdp[0] = 0x91; // synccache(16)
-	}
+	} else
+		assert(0);
 
-	/*
-	 * for synccache, we leave lba and length to 0 to sync all
-	 * blocks on medium.
-	 */
-	if (hdr->dxfer_direction != SG_DXFER_NONE) {
-		if (lba < MAX_10B_LBA) {
-			hdr->cmdp[2] = (unsigned char) ((lba >> 24) & 0xff);
-			hdr->cmdp[3] = (unsigned char) ((lba >> 16) & 0xff);
-			hdr->cmdp[4] = (unsigned char) ((lba >>  8) & 0xff);
-			hdr->cmdp[5] = (unsigned char) (lba & 0xff);
-			hdr->cmdp[7] = (unsigned char) ((nr_blocks >> 8) & 0xff);
-			hdr->cmdp[8] = (unsigned char) (nr_blocks & 0xff);
-		} else {
-			hdr->cmdp[2] = (unsigned char) ((lba >> 56) & 0xff);
-			hdr->cmdp[3] = (unsigned char) ((lba >> 48) & 0xff);
-			hdr->cmdp[4] = (unsigned char) ((lba >> 40) & 0xff);
-			hdr->cmdp[5] = (unsigned char) ((lba >> 32) & 0xff);
-			hdr->cmdp[6] = (unsigned char) ((lba >> 24) & 0xff);
-			hdr->cmdp[7] = (unsigned char) ((lba >> 16) & 0xff);
-			hdr->cmdp[8] = (unsigned char) ((lba >>  8) & 0xff);
-			hdr->cmdp[9] = (unsigned char) (lba & 0xff);
-			hdr->cmdp[10] = (unsigned char) ((nr_blocks >> 32) & 0xff);
-			hdr->cmdp[11] = (unsigned char) ((nr_blocks >> 16) & 0xff);
-			hdr->cmdp[12] = (unsigned char) ((nr_blocks >> 8) & 0xff);
-			hdr->cmdp[13] = (unsigned char) (nr_blocks & 0xff);
-		}
-	}
-
-	hdr->timeout = SCSI_TIMEOUT_MS;
 	return 0;
 }
 
-static int fio_sgio_queue(struct thread_data *td, struct io_u *io_u)
+static void fio_sgio_unmap_setup(struct sg_io_hdr *hdr, struct sgio_trim *st)
+{
+	uint16_t cnt = st->unmap_range_count * 16;
+
+	hdr->dxfer_len = cnt + 8;
+	sgio_set_be16(cnt + 8, &hdr->cmdp[7]);
+	sgio_set_be16(cnt + 6, st->unmap_param);
+	sgio_set_be16(cnt, &st->unmap_param[2]);
+
+	return;
+}
+
+static enum fio_q_status fio_sgio_queue(struct thread_data *td,
+					struct io_u *io_u)
 {
 	struct sg_io_hdr *hdr = &io_u->hdr;
+	struct sgio_data *sd = td->io_ops_data;
 	int ret, do_sync = 0;
 
 	fio_ro_check(td, io_u);
 
-	if (td->o.sync_io || td->o.odirect || ddir_sync(io_u->ddir))
+	if (sgio_unbuffered(td) || ddir_sync(io_u->ddir))
 		do_sync = 1;
+
+	if (io_u->ddir == DDIR_TRIM) {
+		if (do_sync || io_u->file->filetype == FIO_TYPE_BLOCK) {
+			struct sgio_trim *st = sd->trim_queues[sd->current_queue];
+
+			/* finish cdb setup for unmap because we are
+			** doing unmap commands synchronously */
+#ifdef FIO_SGIO_DEBUG
+			assert(st->unmap_range_count == 1);
+			assert(io_u == st->trim_io_us[0]);
+#endif
+			hdr = &io_u->hdr;
+
+			fio_sgio_unmap_setup(hdr, st);
+
+			st->unmap_range_count = 0;
+			sd->current_queue = -1;
+		} else
+			/* queue up trim ranges and submit in commit() */
+			return FIO_Q_QUEUED;
+	}
 
 	ret = fio_sgio_doio(td, io_u, do_sync);
 
@@ -352,6 +660,14 @@ static int fio_sgio_queue(struct thread_data *td, struct io_u *io_u)
 	else if (hdr->status) {
 		io_u->resid = hdr->resid;
 		io_u->error = EIO;
+	} else if (td->io_ops->commit != NULL) {
+		if (do_sync && !ddir_sync(io_u->ddir)) {
+			io_u_mark_submit(td, 1);
+			io_u_mark_complete(td, 1);
+		} else if (io_u->ddir == DDIR_READ || io_u->ddir == DDIR_WRITE) {
+			io_u_mark_submit(td, 1);
+			io_u_queued(td, io_u);
+		}
 	}
 
 	if (io_u->error) {
@@ -360,6 +676,62 @@ static int fio_sgio_queue(struct thread_data *td, struct io_u *io_u)
 	}
 
 	return ret;
+}
+
+static int fio_sgio_commit(struct thread_data *td)
+{
+	struct sgio_data *sd = td->io_ops_data;
+	struct sgio_trim *st;
+	struct io_u *io_u;
+	struct sg_io_hdr *hdr;
+	struct timespec now;
+	unsigned int i;
+	int ret;
+
+	if (sd->current_queue == -1)
+		return 0;
+
+	st = sd->trim_queues[sd->current_queue];
+	io_u = st->trim_io_us[0];
+	hdr = &io_u->hdr;
+
+	fio_sgio_unmap_setup(hdr, st);
+
+	sd->current_queue = -1;
+
+	ret = fio_sgio_rw_doio(td, io_u->file, io_u, 0);
+
+	if (ret < 0 || hdr->status) {
+		int error;
+
+		if (ret < 0)
+			error = errno;
+		else {
+			error = EIO;
+			ret = -EIO;
+		}
+
+		for (i = 0; i < st->unmap_range_count; i++) {
+			st->trim_io_us[i]->error = error;
+			clear_io_u(td, st->trim_io_us[i]);
+			if (hdr->status)
+				st->trim_io_us[i]->resid = hdr->resid;
+		}
+
+		td_verror(td, error, "xfer");
+		return ret;
+	}
+
+	if (fio_fill_issue_time(td)) {
+		fio_gettime(&now, NULL);
+		for (i = 0; i < st->unmap_range_count; i++) {
+			memcpy(&st->trim_io_us[i]->issue_time, &now, sizeof(now));
+			io_u_queued(td, io_u);
+		}
+	}
+	io_u_mark_submit(td, st->unmap_range_count);
+
+	return 0;
 }
 
 static struct io_u *fio_sgio_event(struct thread_data *td, int event)
@@ -377,6 +749,8 @@ static int fio_sgio_read_capacity(struct thread_data *td, unsigned int *bs,
 	 * io_u structures, which are not initialized until later.
 	 */
 	struct sg_io_hdr hdr;
+	unsigned long long hlba;
+	unsigned int blksz = 0;
 	unsigned char cmd[16];
 	unsigned char sb[64];
 	unsigned char buf[32];  // read capacity return
@@ -413,21 +787,23 @@ static int fio_sgio_read_capacity(struct thread_data *td, unsigned int *bs,
 		return ret;
 	}
 
-	*bs	 = (buf[4] << 24) | (buf[5] << 16) | (buf[6] << 8) | buf[7];
-	*max_lba = ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) & MAX_10B_LBA;  // for some reason max_lba is being sign extended even though unsigned.
+	if (hdr.info & SG_INFO_CHECK) {
+		/* RCAP(10) might be unsupported by device. Force RCAP(16) */
+		hlba = MAX_10B_LBA;
+	} else {
+		blksz = sgio_get_be32(&buf[4]);
+		hlba = sgio_get_be32(buf);
+	}
 
 	/*
 	 * If max lba masked by MAX_10B_LBA equals MAX_10B_LBA,
 	 * then need to retry with 16 byte Read Capacity command.
 	 */
-	if (*max_lba == MAX_10B_LBA) {
+	if (hlba == MAX_10B_LBA) {
 		hdr.cmd_len = 16;
 		hdr.cmdp[0] = 0x9e; // service action
 		hdr.cmdp[1] = 0x10; // Read Capacity(16)
-		hdr.cmdp[10] = (unsigned char) ((sizeof(buf) >> 24) & 0xff);
-		hdr.cmdp[11] = (unsigned char) ((sizeof(buf) >> 16) & 0xff);
-		hdr.cmdp[12] = (unsigned char) ((sizeof(buf) >> 8) & 0xff);
-		hdr.cmdp[13] = (unsigned char) (sizeof(buf) & 0xff);
+		sgio_set_be32(sizeof(buf), &hdr.cmdp[10]);
 
 		hdr.dxfer_direction = SG_DXFER_FROM_DEV;
 		hdr.dxferp = buf;
@@ -443,24 +819,26 @@ static int fio_sgio_read_capacity(struct thread_data *td, unsigned int *bs,
 		if (hdr.info & SG_INFO_CHECK)
 			td_verror(td, EIO, "fio_sgio_read_capacity");
 
-		*bs = (buf[8] << 24) | (buf[9] << 16) | (buf[10] << 8) | buf[11];
-		*max_lba = ((unsigned long long)buf[0] << 56) |
-				((unsigned long long)buf[1] << 48) |
-				((unsigned long long)buf[2] << 40) |
-				((unsigned long long)buf[3] << 32) |
-				((unsigned long long)buf[4] << 24) |
-				((unsigned long long)buf[5] << 16) |
-				((unsigned long long)buf[6] << 8) |
-				(unsigned long long)buf[7];
+		blksz = sgio_get_be32(&buf[8]);
+		hlba = sgio_get_be64(buf);
+	}
+
+	if (blksz) {
+		*bs = blksz;
+		*max_lba = hlba;
+		ret = 0;
+	} else {
+		ret = EIO;
 	}
 
 	close(fd);
-	return 0;
+	return ret;
 }
 
 static void fio_sgio_cleanup(struct thread_data *td)
 {
 	struct sgio_data *sd = td->io_ops_data;
+	int i;
 
 	if (sd) {
 		free(sd->events);
@@ -468,6 +846,17 @@ static void fio_sgio_cleanup(struct thread_data *td)
 		free(sd->fd_flags);
 		free(sd->pfds);
 		free(sd->sgbuf);
+#ifdef FIO_SGIO_DEBUG
+		free(sd->trim_queue_map);
+#endif
+
+		for (i = 0; i < td->o.iodepth; i++) {
+			free(sd->trim_queues[i]->unmap_param);
+			free(sd->trim_queues[i]->trim_io_us);
+			free(sd->trim_queues[i]);
+		}
+
+		free(sd->trim_queues);
 		free(sd);
 	}
 }
@@ -475,20 +864,30 @@ static void fio_sgio_cleanup(struct thread_data *td)
 static int fio_sgio_init(struct thread_data *td)
 {
 	struct sgio_data *sd;
+	struct sgio_trim *st;
+	int i;
 
-	sd = malloc(sizeof(*sd));
-	memset(sd, 0, sizeof(*sd));
-	sd->cmds = malloc(td->o.iodepth * sizeof(struct sgio_cmd));
-	memset(sd->cmds, 0, td->o.iodepth * sizeof(struct sgio_cmd));
-	sd->events = malloc(td->o.iodepth * sizeof(struct io_u *));
-	memset(sd->events, 0, td->o.iodepth * sizeof(struct io_u *));
-	sd->pfds = malloc(sizeof(struct pollfd) * td->o.nr_files);
-	memset(sd->pfds, 0, sizeof(struct pollfd) * td->o.nr_files);
-	sd->fd_flags = malloc(sizeof(int) * td->o.nr_files);
-	memset(sd->fd_flags, 0, sizeof(int) * td->o.nr_files);
-	sd->sgbuf = malloc(sizeof(struct sg_io_hdr) * td->o.iodepth);
-	memset(sd->sgbuf, 0, sizeof(struct sg_io_hdr) * td->o.iodepth);
+	sd = calloc(1, sizeof(*sd));
+	sd->cmds = calloc(td->o.iodepth, sizeof(struct sgio_cmd));
+	sd->sgbuf = calloc(td->o.iodepth, sizeof(struct sg_io_hdr));
+	sd->events = calloc(td->o.iodepth, sizeof(struct io_u *));
+	sd->pfds = calloc(td->o.nr_files, sizeof(struct pollfd));
+	sd->fd_flags = calloc(td->o.nr_files, sizeof(int));
 	sd->type_checked = 0;
+
+	sd->trim_queues = calloc(td->o.iodepth, sizeof(struct sgio_trim *));
+	sd->current_queue = -1;
+#ifdef FIO_SGIO_DEBUG
+	sd->trim_queue_map = calloc(td->o.iodepth, sizeof(int));
+#endif
+	for (i = 0; i < td->o.iodepth; i++) {
+		sd->trim_queues[i] = calloc(1, sizeof(struct sgio_trim));
+		st = sd->trim_queues[i];
+		st->unmap_param = calloc(td->o.iodepth + 1, sizeof(char[16]));
+		st->unmap_range_count = 0;
+		st->trim_io_us = calloc(td->o.iodepth, sizeof(struct io_u *));
+	}
+
 	td->io_ops_data = sd;
 
 	/*
@@ -540,6 +939,12 @@ static int fio_sgio_type_check(struct thread_data *td, struct fio_file *f)
 	if (f->filetype == FIO_TYPE_BLOCK) {
 		td->io_ops->getevents = NULL;
 		td->io_ops->event = NULL;
+		td->io_ops->commit = NULL;
+		/*
+		** Setting these functions to null may cause problems
+		** with filename=/dev/sda:/dev/sg0 since we are only
+		** considering a single file
+		*/
 	}
 	sd->type_checked = 1;
 
@@ -572,17 +977,17 @@ static char *fio_sgio_errdetails(struct io_u *io_u)
 	struct sg_io_hdr *hdr = &io_u->hdr;
 #define MAXERRDETAIL 1024
 #define MAXMSGCHUNK  128
-	char *msg, msgchunk[MAXMSGCHUNK], *ret = NULL;
+	char *msg, msgchunk[MAXMSGCHUNK];
 	int i;
 
 	msg = calloc(1, MAXERRDETAIL);
+	strcpy(msg, "");
 
 	/*
 	 * can't seem to find sg_err.h, so I'll just echo the define values
 	 * so others can search on internet to find clearer clues of meaning.
 	 */
 	if (hdr->info & SG_INFO_CHECK) {
-		ret = msg;
 		if (hdr->host_status) {
 			snprintf(msgchunk, MAXMSGCHUNK, "SG Host Status: 0x%02x; ", hdr->host_status);
 			strlcat(msg, msgchunk, MAXERRDETAIL);
@@ -755,14 +1160,31 @@ static char *fio_sgio_errdetails(struct io_u *io_u)
 		if (hdr->resid != 0) {
 			snprintf(msgchunk, MAXMSGCHUNK, "SG Driver: %d bytes out of %d not transferred. ", hdr->resid, hdr->dxfer_len);
 			strlcat(msg, msgchunk, MAXERRDETAIL);
-			ret = msg;
+		}
+		if (hdr->cmdp) {
+			strlcat(msg, "cdb:", MAXERRDETAIL);
+			for (i = 0; i < hdr->cmd_len; i++) {
+				snprintf(msgchunk, MAXMSGCHUNK, " %02x", hdr->cmdp[i]);
+				strlcat(msg, msgchunk, MAXERRDETAIL);
+			}
+			strlcat(msg, ". ", MAXERRDETAIL);
+			if (io_u->ddir == DDIR_TRIM) {
+				unsigned char *param_list = hdr->dxferp;
+				strlcat(msg, "dxferp:", MAXERRDETAIL);
+				for (i = 0; i < hdr->dxfer_len; i++) {
+					snprintf(msgchunk, MAXMSGCHUNK, " %02x", param_list[i]);
+					strlcat(msg, msgchunk, MAXERRDETAIL);
+				}
+				strlcat(msg, ". ", MAXERRDETAIL);
+			}
 		}
 	}
 
-	if (!ret)
-		ret = strdup("SG Driver did not report a Host, Driver or Device check");
+	if (!(hdr->info & SG_INFO_CHECK) && !strlen(msg))
+		snprintf(msg, MAXERRDETAIL, "%s",
+			 "SG Driver did not report a Host, Driver or Device check");
 
-	return ret;
+	return msg;
 }
 
 /*
@@ -814,6 +1236,7 @@ static struct ioengine_ops ioengine = {
 	.init		= fio_sgio_init,
 	.prep		= fio_sgio_prep,
 	.queue		= fio_sgio_queue,
+	.commit		= fio_sgio_commit,
 	.getevents	= fio_sgio_getevents,
 	.errdetails	= fio_sgio_errdetails,
 	.event		= fio_sgio_event,
@@ -822,6 +1245,8 @@ static struct ioengine_ops ioengine = {
 	.close_file	= generic_close_file,
 	.get_file_size	= fio_sgio_get_file_size,
 	.flags		= FIO_SYNCIO | FIO_RAWIO,
+	.options	= options,
+	.option_struct_size	= sizeof(struct sg_options)
 };
 
 #else /* FIO_HAVE_SGIO */

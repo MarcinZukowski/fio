@@ -113,7 +113,8 @@ static int fio_guasi_getevents(struct thread_data *td, unsigned int min,
 	return n;
 }
 
-static int fio_guasi_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_guasi_queue(struct thread_data *td,
+					 struct io_u *io_u)
 {
 	struct guasi_data *ld = td->io_ops_data;
 
@@ -132,7 +133,7 @@ static void fio_guasi_queued(struct thread_data *td, struct io_u **io_us, int nr
 {
 	int i;
 	struct io_u *io_u;
-	struct timeval now;
+	struct timespec now;
 
 	if (!fio_fill_issue_time(td))
 		return;

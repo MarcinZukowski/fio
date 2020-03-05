@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <sys/sysctl.h>
 #include <sys/disk.h>
+#include <sys/endian.h>
 #include <sys/thr.h>
 #include <sys/socket.h>
 #include <sys/param.h>
@@ -15,7 +16,6 @@
 #include "../file.h"
 
 #define FIO_HAVE_ODIRECT
-#define FIO_USE_GENERIC_RAND
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_CHARDEV_SIZE
 #define FIO_HAVE_FS_STAT
@@ -30,13 +30,11 @@
 #define fio_swap32(x)	bswap32(x)
 #define fio_swap64(x)	bswap64(x)
 
-typedef off_t off64_t;
-
 typedef cpuset_t os_cpu_mask_t;
 
 #define fio_cpu_clear(mask, cpu)        (void) CPU_CLR((cpu), (mask))
 #define fio_cpu_set(mask, cpu)          (void) CPU_SET((cpu), (mask))
-#define fio_cpu_isset(mask, cpu)	CPU_ISSET((cpu), (mask))
+#define fio_cpu_isset(mask, cpu)	(CPU_ISSET((cpu), (mask)) != 0)
 #define fio_cpu_count(mask)		CPU_COUNT((mask))
 
 static inline int fio_cpuset_init(os_cpu_mask_t *mask)
@@ -116,7 +114,7 @@ static inline unsigned long long get_fs_free_size(const char *path)
 	return ret;
 }
 
-static inline int os_trim(int fd, unsigned long long start,
+static inline int os_trim(struct fio_file *f, unsigned long long start,
 			  unsigned long long len)
 {
 	off_t range[2];
@@ -124,7 +122,7 @@ static inline int os_trim(int fd, unsigned long long start,
 	range[0] = start;
 	range[1] = len;
 
-	if (!ioctl(fd, DIOCGDELETE, range))
+	if (!ioctl(f->fd, DIOCGDELETE, range))
 		return 0;
 
 	return errno;

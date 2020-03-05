@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -17,7 +18,6 @@
 #include <asm/byteorder.h>
 
 #include "./os-linux-syscall.h"
-#include "binject.h"
 #include "../file.h"
 
 #ifndef __has_builtin         // Optional of course.
@@ -201,23 +201,6 @@ static inline unsigned long long os_phys_mem(void)
 	return (unsigned long long) pages * (unsigned long long) pagesize;
 }
 
-typedef struct { unsigned short r[3]; } os_random_state_t;
-
-static inline void os_random_seed(unsigned long seed, os_random_state_t *rs)
-{
-	rs->r[0] = seed & 0xffff;
-	seed >>= 16;
-	rs->r[1] = seed & 0xffff;
-	seed >>= 16;
-	rs->r[2] = seed & 0xffff;
-	seed48(rs->r);
-}
-
-static inline long os_random_long(os_random_state_t *rs)
-{
-	return nrand48(rs->r);
-}
-
 #ifdef O_NOATIME
 #define FIO_O_NOATIME	O_NOATIME
 #else
@@ -273,7 +256,7 @@ static inline unsigned long long get_fs_free_size(const char *path)
 	return ret;
 }
 
-static inline int os_trim(int fd, unsigned long long start,
+static inline int os_trim(struct fio_file *f, unsigned long long start,
 			  unsigned long long len)
 {
 	uint64_t range[2];
@@ -281,7 +264,7 @@ static inline int os_trim(int fd, unsigned long long start,
 	range[0] = start;
 	range[1] = len;
 
-	if (!ioctl(fd, BLKDISCARD, range))
+	if (!ioctl(f->fd, BLKDISCARD, range))
 		return 0;
 
 	return errno;

@@ -9,8 +9,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
-#include <assert.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/mman.h>
 
 #include "../fio.h"
@@ -32,7 +31,7 @@ static int fio_splice_read_old(struct thread_data *td, struct io_u *io_u)
 	struct fio_file *f = io_u->file;
 	int ret, ret2, buflen;
 	off_t offset;
-	void *p;
+	char *p;
 
 	offset = io_u->offset;
 	buflen = io_u->xfer_buflen;
@@ -77,7 +76,8 @@ static int fio_splice_read(struct thread_data *td, struct io_u *io_u)
 	struct iovec iov;
 	int ret , buflen, mmap_len;
 	off_t offset;
-	void *p, *map;
+	void *map;
+	char *p;
 
 	ret = 0;
 	offset = io_u->offset;
@@ -199,7 +199,8 @@ static int fio_splice_write(struct thread_data *td, struct io_u *io_u)
 	return io_u->xfer_buflen;
 }
 
-static int fio_spliceio_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_spliceio_queue(struct thread_data *td,
+					    struct io_u *io_u)
 {
 	struct spliceio_data *sd = td->io_ops_data;
 	int ret = 0;
@@ -276,13 +277,6 @@ static int fio_spliceio_init(struct thread_data *td)
 	 * Reset if we fail.
 	 */
 	sd->vmsplice_to_user_map = 1;
-
-	/*
-	 * And if vmsplice_to_user works, we definitely need aligned
-	 * buffers. Just set ->odirect to force that.
-	 */
-	if (td_read(td))
-		td->o.mem_align = 1;
 
 	td->io_ops_data = sd;
 	return 0;

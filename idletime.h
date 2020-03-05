@@ -1,8 +1,9 @@
 #ifndef FIO_IDLETIME_H
 #define FIO_IDLETIME_H
 
-#include "fio.h"
-#include "lib/output_buffer.h"
+#include <sys/time.h>
+#include <sys/types.h>
+#include "os/os.h"
 
 #define CALIBRATE_RUNS  10
 #define CALIBRATE_SCALE 1000
@@ -26,8 +27,8 @@ struct idle_prof_thread {
 	pthread_t thread;
 	int cpu;
 	int state;
-	struct timeval tps;
-	struct timeval tpe;
+	struct timespec tps;
+	struct timespec tpe;
 	double cali_time; /* microseconds to finish a unit work */
 	double loops;
 	double idleness;
@@ -56,5 +57,7 @@ extern void fio_idle_prof_start(void);
 extern void fio_idle_prof_stop(void);
 
 extern void show_idle_prof_stats(int, struct json_object *, struct buf_output *);
+
+extern void fio_idle_prof_cleanup(void);
 
 #endif

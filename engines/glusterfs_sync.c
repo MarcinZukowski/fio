@@ -29,12 +29,12 @@ static int fio_gf_prep(struct thread_data *td, struct io_u *io_u)
 	return 0;
 }
 
-static int fio_gf_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_gf_queue(struct thread_data *td, struct io_u *io_u)
 {
 	struct gf_data *g = td->io_ops_data;
 	int ret = 0;
 
-	dprint(FD_FILE, "fio queue len %lu\n", io_u->xfer_buflen);
+	dprint(FD_FILE, "fio queue len %llu\n", io_u->xfer_buflen);
 	fio_ro_check(td, io_u);
 
 	if (io_u->ddir == DDIR_READ)
@@ -42,14 +42,23 @@ static int fio_gf_queue(struct thread_data *td, struct io_u *io_u)
 	else if (io_u->ddir == DDIR_WRITE)
 		ret = glfs_write(g->fd, io_u->xfer_buf, io_u->xfer_buflen, 0);
 	else if (io_u->ddir == DDIR_SYNC)
+#if defined(CONFIG_GF_NEW_API)
+		ret = glfs_fsync(g->fd, NULL, NULL);
+#else
 		ret = glfs_fsync(g->fd);
+#endif
 	else if (io_u->ddir == DDIR_DATASYNC)
+#if defined(CONFIG_GF_NEW_API)
+		ret = glfs_fdatasync(g->fd, NULL, NULL);
+#else
 		ret = glfs_fdatasync(g->fd);
+#endif
 	else {
 		log_err("unsupported operation.\n");
-		return -EINVAL;
+		io_u->error = EINVAL;
+		return FIO_Q_COMPLETED;
 	}
-	dprint(FD_FILE, "fio len %lu ret %d\n", io_u->xfer_buflen, ret);
+	dprint(FD_FILE, "fio len %llu ret %d\n", io_u->xfer_buflen, ret);
 	if (io_u->file && ret >= 0 && ddir_rw(io_u->ddir))
 		LAST_POS(io_u->file) = io_u->offset + ret;
 

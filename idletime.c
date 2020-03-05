@@ -1,4 +1,5 @@
 #include <math.h>
+#include "fio.h"
 #include "json.h"
 #include "idletime.h"
 
@@ -11,7 +12,7 @@ static volatile struct idle_prof_common ipc;
 static double calibrate_unit(unsigned char *data)
 {
 	unsigned long t, i, j, k;
-	struct timeval tps;
+	struct timespec tps;
 	double tunit = 0.0;
 
 	for (i = 0; i < CALIBRATE_RUNS; i++) {
@@ -183,9 +184,9 @@ static void calibration_stats(void)
 void fio_idle_prof_init(void)
 {
 	int i, ret;
-	struct timeval tp;
 	struct timespec ts;
 	pthread_attr_t tattr;
+	pthread_condattr_t cattr;
 	struct idle_prof_thread *ipt;
 
 	ipc.nr_cpus = cpus_online();
@@ -193,6 +194,13 @@ void fio_idle_prof_init(void)
 
 	if (ipc.opt == IDLE_PROF_OPT_NONE)
 		return;
+
+	ret = pthread_condattr_init(&cattr);
+	assert(ret == 0);
+#ifdef CONFIG_PTHREAD_CONDATTR_SETCLOCK
+	ret = pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+	assert(ret == 0);
+#endif
 
 	if ((ret = pthread_attr_init(&tattr))) {
 		log_err("fio: pthread_attr_init %s\n", strerror(ret));
@@ -239,7 +247,7 @@ void fio_idle_prof_init(void)
 			break;
 		}
 
-		if ((ret = pthread_cond_init(&ipt->cond, NULL))) {
+		if ((ret = pthread_cond_init(&ipt->cond, &cattr))) {
 			ipc.status = IDLE_PROF_STATUS_ABORT;
 			log_err("fio: pthread_cond_init %s\n", strerror(ret));
 			break;
@@ -282,9 +290,12 @@ void fio_idle_prof_init(void)
 		pthread_mutex_lock(&ipt->init_lock);
 		while ((ipt->state != TD_EXITED) &&
 		       (ipt->state!=TD_INITIALIZED)) {
-			fio_gettime(&tp, NULL);
-			ts.tv_sec = tp.tv_sec + 1;
-			ts.tv_nsec = tp.tv_usec * 1000;
+#ifdef CONFIG_PTHREAD_CONDATTR_SETCLOCK
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+			clock_gettime(CLOCK_REALTIME, &ts);
+#endif
+			ts.tv_sec += 1;
 			pthread_cond_timedwait(&ipt->cond, &ipt->init_lock, &ts);
 		}
 		pthread_mutex_unlock(&ipt->init_lock);
@@ -325,7 +336,6 @@ void fio_idle_prof_stop(void)
 {
 	int i;
 	uint64_t runt;
-	struct timeval tp;
 	struct timespec ts;
 	struct idle_prof_thread *ipt;
 
@@ -343,9 +353,8 @@ void fio_idle_prof_stop(void)
 		pthread_mutex_lock(&ipt->start_lock);
 		while ((ipt->state != TD_EXITED) &&
 		       (ipt->state!=TD_NOT_CREATED)) {
-			fio_gettime(&tp, NULL);
-			ts.tv_sec = tp.tv_sec + 1;
-			ts.tv_nsec = tp.tv_usec * 1000;
+			fio_gettime(&ts, NULL);
+			ts.tv_sec += 1;
 			/* timed wait in case a signal is not received */
 			pthread_cond_timedwait(&ipt->cond, &ipt->start_lock, &ts);
 		}
@@ -400,7 +409,7 @@ static double fio_idle_prof_cpu_stat(int cpu)
 	return p * 100.0;
 }
 
-static void fio_idle_prof_cleanup(void)
+void fio_idle_prof_cleanup(void)
 {
 	if (ipc.ipts) {
 		free(ipc.ipts);
@@ -474,10 +483,6 @@ void show_idle_prof_stats(int output, struct json_object *parent,
 			log_buf(out, " stddev=%3.2f\n", ipc.cali_stddev);
 		}
 
-		/* dynamic mem allocations can now be freed */
-		if (ipc.opt != IDLE_PROF_OPT_NONE)
-			fio_idle_prof_cleanup();
-
 		return;
 	}
 
@@ -501,7 +506,5 @@ void show_idle_prof_stats(int output, struct json_object *parent,
 
 		json_object_add_value_float(tmp, "unit_mean", ipc.cali_mean);
 		json_object_add_value_float(tmp, "unit_stddev", ipc.cali_stddev);
-		
-		fio_idle_prof_cleanup();
 	}
 }

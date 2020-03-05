@@ -1,5 +1,5 @@
 /*
- * pmemblk: IO engine that uses NVML libpmemblk to read and write data
+ * pmemblk: IO engine that uses PMDK libpmemblk to read and write data
  *
  * Copyright (C) 2016 Hewlett Packard Enterprise Development LP
  *
@@ -14,8 +14,8 @@
  *
  * You should have received a copy of the GNU General Public
  * License along with this program; if not, write to the Free
- * Software Foundation, Inc., 59 Temple Place, Suite 330,
- * Boston, MA 02111-1307 USA
+ * Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
  */
 
 /*
@@ -226,6 +226,8 @@ static fio_pmemblk_file_t pmb_open(const char *pathspec, int flags)
 
 	pthread_mutex_unlock(&CacheLock);
 
+	free(path);
+
 	return pmb;
 
 error:
@@ -342,7 +344,8 @@ static int fio_pmemblk_get_file_size(struct thread_data *td, struct fio_file *f)
 	return 0;
 }
 
-static int fio_pmemblk_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_pmemblk_queue(struct thread_data *td,
+					   struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
 	fio_pmemblk_file_t pmb = FILE_ENG_DATA(f);

@@ -1,15 +1,14 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include "lib/types.h"
 #include "stat.h"
 
 struct fio_net_cmd;
-struct client_ops;
 
 enum {
 	Client_created		= 0,
@@ -38,6 +37,7 @@ struct fio_client {
 	int port;
 	int fd;
 	unsigned int refs;
+	unsigned int last_cmd;
 
 	char *name;
 
@@ -45,16 +45,16 @@ struct fio_client {
 
 	int state;
 
-	int skip_newline;
-	int is_sock;
-	int disk_stats_shown;
+	bool skip_newline;
+	bool is_sock;
+	bool disk_stats_shown;
 	unsigned int jobs;
 	unsigned int nr_stat;
 	int error;
 	int signal;
 	int ipv6;
-	int sent_job;
-	int did_stat;
+	bool sent_job;
+	bool did_stat;
 	uint32_t type;
 
 	uint32_t thread_number;
@@ -74,12 +74,17 @@ struct fio_client {
 
 	struct client_file *files;
 	unsigned int nr_files;
+
+	struct buf_output buf;
 };
 
 typedef void (client_cmd_op)(struct fio_client *, struct fio_net_cmd *);
+typedef void (client_op)(struct fio_client *);
 typedef void (client_eta_op)(struct jobs_eta *je);
 typedef void (client_timed_out_op)(struct fio_client *);
 typedef void (client_jobs_eta_op)(struct fio_client *client, struct jobs_eta *je);
+
+extern struct client_ops fio_client_ops;
 
 struct client_ops {
 	client_cmd_op		*text;
@@ -93,7 +98,7 @@ struct client_ops {
 	client_cmd_op		*add_job;
 	client_cmd_op		*update_job;
 	client_timed_out_op	*timed_out;
-	client_cmd_op		*stop;
+	client_op		*stop;
 	client_cmd_op		*start;
 	client_cmd_op		*job_start;
 	client_timed_out_op	*removed;
@@ -102,8 +107,6 @@ struct client_ops {
 	int stay_connected;
 	uint32_t client_type;
 };
-
-extern struct client_ops fio_client_ops;
 
 struct client_eta {
 	unsigned int pending;

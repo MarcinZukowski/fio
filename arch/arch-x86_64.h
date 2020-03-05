@@ -10,15 +10,15 @@ static inline void do_cpuid(unsigned int *eax, unsigned int *ebx,
 		: "memory");
 }
 
-#include "arch-x86-common.h"
+#include "arch-x86-common.h" /* IWYU pragma: export */
 
 #define FIO_ARCH	(arch_x86_64)
 
 #define	FIO_HUGE_PAGE		2097152
 
 #define nop		__asm__ __volatile__("rep;nop": : :"memory")
-#define read_barrier()	__asm__ __volatile__("lfence":::"memory")
-#define write_barrier()	__asm__ __volatile__("sfence":::"memory")
+#define read_barrier()	__asm__ __volatile__("":::"memory")
+#define write_barrier()	__asm__ __volatile__("":::"memory")
 
 static inline unsigned long arch_ffz(unsigned long bitmask)
 {

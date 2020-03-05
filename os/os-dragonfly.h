@@ -5,18 +5,26 @@
 
 #include <errno.h>
 #include <unistd.h>
+#include <sys/endian.h>
 #include <sys/param.h>
 #include <sys/sysctl.h>
 #include <sys/statvfs.h>
 #include <sys/diskslice.h>
-#include <sys/ioctl_compat.h>
 #include <sys/usched.h>
 #include <sys/resource.h>
 
+/* API changed during "5.3 development" */
+#if __DragonFly_version < 500302
+#include <sys/ioctl_compat.h>
+#define DAIOCTRIM	IOCTLTRIM
+#else
+#include <bus/cam/scsi/scsi_daio.h>
+#endif
+
 #include "../file.h"
+#include "../lib/types.h"
 
 #define FIO_HAVE_ODIRECT
-#define FIO_USE_GENERIC_RAND
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_FS_STAT
 #define FIO_HAVE_TRIM
@@ -39,7 +47,6 @@
 /* This is supposed to equal (sizeof(cpumask_t)*8) */
 #define FIO_MAX_CPUS	SMP_MAXCPU
 
-typedef off_t off64_t;
 typedef cpumask_t os_cpu_mask_t;
 
 /*
@@ -106,12 +113,9 @@ static inline void fio_cpu_set(os_cpu_mask_t *mask, int cpu)
 	CPUMASK_ORBIT(*mask, cpu);
 }
 
-static inline int fio_cpu_isset(os_cpu_mask_t *mask, int cpu)
+static inline bool fio_cpu_isset(os_cpu_mask_t *mask, int cpu)
 {
-	if (CPUMASK_TESTBIT(*mask, cpu))
-		return 1;
-
-	return 0;
+	return CPUMASK_TESTBIT(*mask, cpu) != 0;
 }
 
 static inline int fio_setaffinity(int pid, os_cpu_mask_t mask)
@@ -197,10 +201,12 @@ static inline unsigned long long os_phys_mem(void)
 	return mem;
 }
 
+#ifndef CONFIG_HAVE_GETTID
 static inline int gettid(void)
 {
 	return (int) lwp_gettid();
 }
+#endif
 
 static inline unsigned long long get_fs_free_size(const char *path)
 {
@@ -215,7 +221,7 @@ static inline unsigned long long get_fs_free_size(const char *path)
 	return ret;
 }
 
-static inline int os_trim(int fd, unsigned long long start,
+static inline int os_trim(struct fio_file *f, unsigned long long start,
 			  unsigned long long len)
 {
 	off_t range[2];
@@ -223,7 +229,7 @@ static inline int os_trim(int fd, unsigned long long start,
 	range[0] = start;
 	range[1] = len;
 
-	if (!ioctl(fd, IOCTLTRIM, range))
+	if (!ioctl(f->fd, DAIOCTRIM, range))
 		return 0;
 
 	return errno;

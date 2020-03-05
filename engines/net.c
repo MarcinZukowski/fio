@@ -9,13 +9,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
-#include <assert.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/poll.h>
-#include <sys/types.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -644,8 +642,9 @@ static int fio_netio_recv(struct thread_data *td, struct io_u *io_u)
 	return ret;
 }
 
-static int __fio_netio_queue(struct thread_data *td, struct io_u *io_u,
-			     enum fio_ddir ddir)
+static enum fio_q_status __fio_netio_queue(struct thread_data *td,
+					   struct io_u *io_u,
+					   enum fio_ddir ddir)
 {
 	struct netio_data *nd = td->io_ops_data;
 	struct netio_options *o = td->eo;
@@ -689,7 +688,8 @@ static int __fio_netio_queue(struct thread_data *td, struct io_u *io_u,
 	return FIO_Q_COMPLETED;
 }
 
-static int fio_netio_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_netio_queue(struct thread_data *td,
+					 struct io_u *io_u)
 {
 	struct netio_options *o = td->eo;
 	int ret;
@@ -1105,8 +1105,7 @@ static int fio_netio_setup_connect_unix(struct thread_data *td,
 	struct sockaddr_un *soun = &nd->addr_un;
 
 	soun->sun_family = AF_UNIX;
-	memset(soun->sun_path, 0, sizeof(soun->sun_path));
-	strncpy(soun->sun_path, path, sizeof(soun->sun_path) - 1);
+	snprintf(soun->sun_path, sizeof(soun->sun_path), "%s", path);
 	return 0;
 }
 
@@ -1135,9 +1134,8 @@ static int fio_netio_setup_listen_unix(struct thread_data *td, const char *path)
 
 	mode = umask(000);
 
-	memset(addr, 0, sizeof(*addr));
 	addr->sun_family = AF_UNIX;
-	strncpy(addr->sun_path, path, sizeof(addr->sun_path) - 1);
+	snprintf(addr->sun_path, sizeof(addr->sun_path), "%s", path);
 	unlink(path);
 
 	len = sizeof(addr->sun_family) + strlen(path) + 1;
