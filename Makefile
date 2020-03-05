@@ -57,7 +57,7 @@ SOURCE :=	$(sort $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		steadystate.c zone-dist.c
 
 # List of compiled C++ files
-CPP_SOURCE := 
+CPP_SOURCE :=
 
 ifdef CONFIG_LIBHDFS
   HDFSFLAGS= -I $(JAVA_HOME)/include -I $(JAVA_HOME)/include/linux -I $(FIO_LIBHDFS_INCLUDE)
@@ -414,9 +414,9 @@ FIO-VERSION-FILE: FORCE
 override CFLAGS += -DFIO_VERSION='"$(FIO_VERSION)"'
 
 %.o : %.c
-	mkdir -p $(dir $@)
+	@mkdir -p $(dir $@)
 	$(QUIET_CC)$(CC) -o $@ $(CFLAGS) $(CPPFLAGS) -c $<
-	$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
+	@$(CC) -MM $(CFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.c > $*.d
 	@mv -f $*.d $*.d.tmp
 	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
 	@if type -p fmt >/dev/null 2>&1; then				\
@@ -430,13 +430,19 @@ override CFLAGS += -DFIO_VERSION='"$(FIO_VERSION)"'
 	@rm -f $*.d.tmp
 
 %.o : %.cpp
-	mkdir -p $(dir $@)
+	@mkdir -p $(dir $@)
 	$(QUIET_CC)$(CXX) -o $@ $(CXXFLAGS) $(CPPFLAGS) -c $<
-	$(CXX) -MM $(CXXFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.cpp > $*.d
+	@$(CXX) -MM $(CXXFLAGS) $(CPPFLAGS) $(SRCDIR)/$*.cpp > $*.d
 	@mv -f $*.d $*.d.tmp
 	@sed -e 's|.*:|$*.o:|' < $*.d.tmp > $*.d
-	@sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 | \
-		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d
+	@if type -p fmt >/dev/null 2>&1; then				\
+		sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp | fmt -w 1 |	\
+		sed -e 's/^ *//' -e 's/$$/:/' >> $*.d;			\
+	else								\
+		sed -e 's/.*://' -e 's/\\$$//' < $*.d.tmp |		\
+		tr -cs "[:graph:]" "\n" |				\
+		sed -e 's/^ *//' -e '/^$$/ d' -e 's/$$/:/' >> $*.d;	\
+	fi
 	@rm -f $*.d.tmp
 
 
