@@ -7,11 +7,10 @@
 extern "C" {
 #endif
 
-struct s3_config
-{
-  int padding;  // so offset is not zero
-  char *region;
-  int verbose;
+struct s3_config {
+	int padding;  // so offset is not zero
+	char *region;
+	int verbose;
 };
 
 void s3_init();

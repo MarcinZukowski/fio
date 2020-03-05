@@ -15,41 +15,41 @@
  * Queue of pointers
  */
 typedef struct {
-  int capacity;
-  void **pointers;
-  int used;
-  int head;
+	int capacity;
+	void **pointers;
+	int used;
+	int head;
 } qop;
 
 /**
  * The global state of GAS
  */
 struct gas_data {
-  int depth;
+	int depth;
 
-  /** io_us ready to be committed */
-  qop *queued_io_us;
+	/** io_us ready to be committed */
+	qop *queued_io_us;
 
-  /** Entries that are finished */
-  qop *done_gas_ios;
+	/** Entries that are finished */
+	qop *done_gas_ios;
 
-  struct gas_io **last_done_gas_ios;
-  unsigned int last_done_used;
+	struct gas_io **last_done_gas_ios;
+	unsigned int last_done_used;
 
-  pthread_mutex_t done_mutex;
+	pthread_mutex_t done_mutex;
 
-  threadpool thpool;
+	threadpool thpool;
 
-  void (*worker)(void*);
+	void (*worker)(void *);
 };
 
 /** A single in-flight GAS request */
 struct gas_io {
-  struct io_u* io_u;
-  struct gas_data *gas_data;
-  void* backend_data;
+	struct io_u *io_u;
+	struct gas_data *gas_data;
+	void *backend_data;
 };
 
-void gas_init_async(struct thread_data *td, void (*perform_work)(void*));
+void gas_init_async(struct thread_data *td, void (*perform_work)(void *));
 
 void gas_register_async(struct ioengine_ops *ops);
