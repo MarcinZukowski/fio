@@ -58,7 +58,7 @@ int s3_read(struct s3_config *s3_config, void **backend_data, const char *fname,
 		       offset, size);
 	}
 
-	auto &get_object_outcome = s3_client->GetObject(object_request);
+	auto const &get_object_outcome = s3_client->GetObject(object_request);
 
 	if (s3_config->verbose) {
 		printf("[%p] Done request\n", s3_client);
